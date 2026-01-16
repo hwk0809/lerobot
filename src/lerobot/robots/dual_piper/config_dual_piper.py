@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 
-from lerobot.common.cameras import CameraConfig
+from lerobot.cameras import CameraConfig
 
 from ..config import RobotConfig
 
@@ -9,7 +9,7 @@ from ..config import RobotConfig
 @dataclass
 class DualPiperConfig(RobotConfig):
     # Port to connect to the arm
-    port: str
+    # port: str
 
     disable_torque_on_disconnect: bool = True
 

@@ -98,6 +98,7 @@ from lerobot.robots import (  # noqa: F401
     make_robot_from_config,
     so100_follower,
     so101_follower,
+    dual_piper
 )
 from lerobot.teleoperators import (  # noqa: F401
     Teleoperator,
@@ -195,8 +196,9 @@ class RecordConfig:
             self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides)
             self.policy.pretrained_path = policy_path
 
-        if self.teleop is None and self.policy is None:
-            raise ValueError("Choose a policy, a teleoperator or both to control the robot")
+        # 修改：允许不提供 teleop 和 policy，依赖机器人自身的逻辑
+        # if self.teleop is None and self.policy is None:
+        #     raise ValueError("Choose a policy, a teleoperator or both to control the robot")
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:
@@ -333,12 +335,19 @@ def record_loop(
             act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
             act_processed_teleop = teleop_action_processor((act, obs))
         else:
-            logging.info(
-                "No policy or teleoperator provided, skipping action generation."
-                "This is likely to happen when resetting the environment without a teleop device."
-                "The robot won't be at its rest position at the start of the next episode."
-            )
-            continue
+            # logging.info(
+            #     "No policy or teleoperator provided, skipping action generation."
+            #     "This is likely to happen when resetting the environment without a teleop device."
+            #     "The robot won't be at its rest position at the start of the next episode."
+            # )
+            # continue
+            
+            # 被动录制模式：直接从当前的观测中提取动作数据
+            # 过滤掉图像数据，只保留电机位置数据
+            act = {k: v for k, v in obs.items() if k in robot.action_features}
+            # 假装这是从遥操作器来的数据，过一遍处理器
+            act_processed_teleop = teleop_action_processor((act, obs))
+            
 
         # Applies a pipeline to the action, default is IdentityProcessor
         if policy is not None and act_processed_policy is not None:
