@@ -10,6 +10,8 @@ import numpy as np
 import argparse
 from loguru import logger
 from pathlib import Path
+import signal
+import sys
 
 # 引入 LeRobot 路径
 project_root = Path(__file__).resolve().parents[4]
@@ -20,13 +22,32 @@ from lerobot.cameras.photoneo.camera_photoneo import PhotoneoCamera
 from lerobot.cameras.photoneo.configuration_photoneo import PhotoneoCameraConfig
 
 
+# ✅ 全局变量，用于 Ctrl+C 处理
+_global_camera = None
+
+def signal_handler(sig, frame):
+    """处理 Ctrl+C 信号"""
+    logger.warning("\n⚠️  收到中断信号 (Ctrl+C)，正在清理...")
+    global _global_camera
+    if _global_camera is not None and _global_camera.is_connected:
+        logger.info("正在断开相机连接...")
+        _global_camera.disconnect()
+    logger.info("清理完成，退出程序")
+    sys.exit(0)
+
+# 注册信号处理器
+signal.signal(signal.SIGINT, signal_handler)
+
 def test_photoneo_basic(config: PhotoneoCameraConfig):
     """基础测试：连接、同步读取、断开"""
+    global _global_camera  # ✅ 使用全局变量
+    
     logger.info("=" * 60)
     logger.info("测试 1: 基础功能 (同步读取)")
     logger.info("=" * 60)
     
     camera = PhotoneoCamera(config)
+    _global_camera = camera  # ✅ 保存到全局变量
     
     try:
         # 1. 测试连接
@@ -75,15 +96,19 @@ def test_photoneo_basic(config: PhotoneoCameraConfig):
         if camera.is_connected:
             logger.warning("⚠️  相机仍处于连接状态，强制断开...")
             camera.disconnect()
+        _global_camera = None  # ✅ 清除全局变量
 
 
 def test_photoneo_async(config: PhotoneoCameraConfig):
     """异步测试：后台线程采集"""
+    global _global_camera
+    
     logger.info("\n" + "=" * 60)
     logger.info("测试 2: 异步读取")
     logger.info("=" * 60)
     
     camera = PhotoneoCamera(config)
+    _global_camera = camera
     
     try:
         # 1. 连接
@@ -170,6 +195,7 @@ def test_photoneo_async(config: PhotoneoCameraConfig):
     finally:
         if camera.is_connected:
             camera.disconnect()
+        _global_camera = None
 
 
 def test_photoneo_with_processing(config: PhotoneoCameraConfig, args):
@@ -310,12 +336,12 @@ def main():
                        help="外参标定文件路径 (txt 格式)")
     
     parser.add_argument("--camera_pos", type=float, nargs=3, 
-                       default=[1.54116268, 0.13879753, 0.75927529],
+                       default= [-0.03846401,-0.11231157,1.13300097],
                        metavar=('X', 'Y', 'Z'),
                        help="相机在世界坐标系的位置 (米)")
     
     parser.add_argument("--camera_quat", type=float, nargs=4,
-                       default=[0.58455770, 0.60577063, -0.40007590, -0.36231688],
+                      default=[0.70629295,-0.69512124,0.09361616,-0.09587879],
                        metavar=('X', 'Y', 'Z', 'W'),
                        help="相机在世界坐标系的旋转四元数 [x, y, z, w]")
     

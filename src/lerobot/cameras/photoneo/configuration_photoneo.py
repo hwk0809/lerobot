@@ -16,7 +16,7 @@ class PhotoneoCameraConfig(CameraConfig):
         config = PhotoneoCameraConfig(
             device_id="PAG-076",
             fps=20,
-            translation=[-0.038, -0.112, 1.133],
+            translation=[1.54116268, 0.13879753, 0.75927529],
             quaternion=[0.706, -0.695, 0.094, -0.096]
         )
         camera = PhotoneoCamera(config)
@@ -41,10 +41,10 @@ class PhotoneoCameraConfig(CameraConfig):
     # 外参（优先级：translation+quaternion > calibration_path）
 
     translation: list[float] | None = field(
-        default_factory=lambda: [1.54116268, 0.13879753, 0.75927529]
+        default_factory=lambda: [-0.03846401,-0.11231157,1.13300097]
     )
     quaternion: list[float] | None = field(
-        default_factory=lambda: [0.58455770, 0.60577063, -0.40007590, -0.36231688]
+        default_factory=lambda: [0.70629295,-0.69512124,0.09361616,-0.09587879]
     )
     # translation: list[float] | None = None
     # quaternion: list[float] | None = None

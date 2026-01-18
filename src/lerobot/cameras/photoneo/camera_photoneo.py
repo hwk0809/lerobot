@@ -194,7 +194,6 @@ class PhotoneoCamera(Camera):  # ✅ 继承 Camera 基类
                 logger.info(f"Connection attempt {attempt + 1}/{max_retries}...")
                 self.ia = self.h.create({'id_': self.device_id})
                 
-                # ✅ 验证设备是否真正可用（尝试读取一个简单的属性）
                 self.features = self.ia.remote_device.node_map
                 
                 # 尝试配置设备，如果失败说明设备还没准备好
@@ -302,10 +301,17 @@ class PhotoneoCamera(Camera):  # ✅ 继承 Camera 基类
                 with self.frame_lock:
                     self.latest_frame = frame
                 self.new_frame_event.set()
+            except KeyboardInterrupt:
+                # ✅ 捕获 Ctrl+C，优雅退出
+                logger.info("Keyboard interrupt in read loop, stopping...")
+                break
             except Exception as e:
-                logger.error(f"Error in read loop: {e}")
+                if not self.stop_event.is_set():  # ✅ 只在非主动停止时报错
+                    logger.error(f"Error in read loop: {e}")
                 time.sleep(0.1)
-    
+        
+        logger.info("Read loop stopped")
+
     def _start_read_thread(self) -> None:
         """启动后台读取线程"""
         if self.thread is not None and self.thread.is_alive():
@@ -316,7 +322,7 @@ class PhotoneoCamera(Camera):  # ✅ 继承 Camera 基类
         
         self.stop_event = Event()
         self.thread = Thread(target=self._read_loop, name=f"{self}_read_loop")
-        self.thread.daemon = True
+        self.thread.daemon = True  # ✅ 设置为守护线程，主线程退出时自动终止
         self.thread.start()
         logger.info(f"{self} async read thread started")
     
@@ -361,7 +367,7 @@ class PhotoneoCamera(Camera):  # ✅ 继承 Camera 基类
             logger.info("Stopping background thread...")
             self._stop_read_thread()
         
-        # ✅ 立即设置断开状态（避免异常导致状态不一致）
+        # ✅ 立即设置断开状态
         self._is_connected = False
         
         try:
@@ -371,29 +377,33 @@ class PhotoneoCamera(Camera):  # ✅ 继承 Camera 基类
                     logger.info("Stopping acquisition...")
                     self.ia.stop()
                 except Exception as e:
-                    logger.warning(f"Error stopping acquisition: {e}")
-                
+                    logger.debug(f"Error stopping acquisition: {e}")  # ✅ 降级为 debug
+            
                 try:
                     logger.info("Destroying image acquirer...")
                     self.ia.destroy()
                 except Exception as e:
-                    logger.warning(f"Error destroying image acquirer: {e}")
+                    logger.debug(f"Error destroying image acquirer: {e}")
                 finally:
                     self.ia = None
-            
+        
             # 重置 Harvester
             if self.h is not None:
                 try:
                     logger.info("Resetting Harvester...")
                     self.h.reset()
                 except Exception as e:
-                    logger.warning(f"Error resetting Harvester: {e}")
+                    logger.debug(f"Error resetting Harvester: {e}")
                 finally:
                     self.h = None
-            
+        
             self.features = None
-            logger.info(f"{self} hardware disconnected")
+            logger.success(f"{self} disconnected successfully")
             
+        except KeyboardInterrupt:
+            # ✅ 处理 Ctrl+C
+            logger.warning("Disconnect interrupted by user")
+            raise
         except Exception as e:
             logger.error(f"Error during disconnect: {e}")
             # ✅ 即使出错也保持断开状态
