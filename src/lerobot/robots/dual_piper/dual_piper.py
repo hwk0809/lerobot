@@ -18,6 +18,7 @@ import logging
 import time
 from functools import cached_property
 from typing import Any
+import numpy as np
 
 from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
@@ -114,7 +115,12 @@ class DualPiper(Robot):
 
     @property
     def is_connected(self) -> bool:
-        return self.is_robot_connected and all(cam.is_connected for cam in self.cameras.values())
+        cameras_connected = all(cam.is_connected for cam in self.cameras.values())
+        
+
+        pcd_connected = (self.point_cloud_camera is None or 
+                        self.point_cloud_camera.is_connected)
+        return self.is_robot_connected and cameras_connected and pcd_connected
 
     def connect(self, calibrate: bool = True) -> None:
         """
@@ -132,6 +138,12 @@ class DualPiper(Robot):
 
         for cam in self.cameras.values():
             cam.connect()
+
+        # ✅ 点云相机连接
+        if self.point_cloud_camera is not None:
+            logger.info("Connecting point cloud sensor...")
+            self.point_cloud_camera.connect()
+            logger.info("✅ Point cloud sensor connected")
         logger.info(f"{self} connected.")
 
     @property
@@ -186,6 +198,45 @@ class DualPiper(Robot):
             obs_dict[cam_key] = cam.async_read()
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+        
+        # ✅ Capture point cloud
+        if self.point_cloud_camera is not None:
+            start = time.perf_counter()
+            
+            try:
+                # 异步读取原始点云（已应用外参）
+                raw_pcd = self.point_cloud_camera.async_read(timeout_ms=2000)
+                
+                # ✅ 使用你的处理函数
+                from common.vision_utils import process_point_cloud
+                processed_pcd = process_point_cloud(
+                    raw_pcd,
+                    num_points=self.config.point_cloud.num_points,
+                    use_gpu=True,
+                    visualize=False
+                )
+                obs_dict["observation.point_cloud"] = processed_pcd
+
+                dt_ms = (time.perf_counter() - start) * 1e3
+                logger.info(
+                f"Point cloud captured: "
+                f"raw={raw_pcd.shape[0]} points, "
+                f"processed={processed_pcd.shape[0]} points, "
+                f"time={dt_ms:.1f}ms, "
+                f"range=[X:{processed_pcd[:, 0].min():.3f}~{processed_pcd[:, 0].max():.3f}, "
+                f"Y:{processed_pcd[:, 1].min():.3f}~{processed_pcd[:, 1].max():.3f}, "
+                f"Z:{processed_pcd[:, 2].min():.3f}~{processed_pcd[:, 2].max():.3f}]"
+                )
+                
+                dt_ms = (time.perf_counter() - start) * 1e3
+                logger.debug(f"{self} read point_cloud: {dt_ms:.1f}ms")
+                
+            except Exception as e:
+                logger.error(f"Failed to read point cloud: {e}")
+                # 失败时返回空点云
+                obs_dict["observation.point_cloud"] = np.zeros(
+                    (self.config.point_cloud.num_points, 3), dtype=np.float32
+                )
 
         return obs_dict
 
@@ -204,17 +255,21 @@ class DualPiper(Robot):
         pcd_cfg = self.config.point_cloud
         
         if pcd_cfg.camera_type == "photoneo":
-            from lerobot.cameras.photoneo import PhotoneoCamera
-            
-            self.point_cloud_camera = PhotoneoCamera(
-                dev_id=pcd_cfg.device_id,
-                camera_translation=pcd_cfg.translation,
-                camera_quaternion=pcd_cfg.quaternion,
+            from lerobot.cameras.photoneo import PhotoneoCamera, PhotoneoCameraConfig
+            camera_config = PhotoneoCameraConfig(
+                device_id=pcd_cfg.device_id,
+                num_points=pcd_cfg.num_points,
+                fps=pcd_cfg.fps,
                 width=pcd_cfg.width,
                 height=pcd_cfg.height,
+                translation=pcd_cfg.translation,
+                quaternion=pcd_cfg.quaternion,
+                calibration_path=pcd_cfg.calibration_path,
             )
-            logger.info(f"✅ Photoneo point cloud camera initialized: {pcd_cfg.device_id}")
+            self.point_cloud_camera = PhotoneoCamera(camera_config)
+            logger.info(f"✅ Photoneo point cloud sensor initialized: {pcd_cfg.device_id}")
         
+
         elif pcd_cfg.camera_type == "zed":
             from lerobot.cameras.zed import ZedCamera
             
@@ -237,5 +292,10 @@ class DualPiper(Robot):
 
         for cam in self.cameras.values():
             cam.disconnect()
+        
+        if self.point_cloud_camera is not None:
+            logger.info("Disconnecting point cloud sensor...")
+            self.point_cloud_camera.disconnect()
+            logger.info("✅ Point cloud sensor disconnected")
 
         logger.info(f"{self} disconnected.")

@@ -34,6 +34,9 @@ class PhotoneoCameraConfig(CameraConfig):
     """
     
     device_id: str = "PAG-076"
+
+    # 点云采样参数（处理后的点数）
+    num_points: int = 2048
     
     # 外参（优先级：translation+quaternion > calibration_path）
 
