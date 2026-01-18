@@ -43,6 +43,10 @@ def make_cameras_from_configs(camera_configs: dict[str, CameraConfig]) -> dict[s
 
             cameras[key] = Reachy2Camera(cfg)
 
+        elif cfg.type == "photoneo":
+            from .photoneo.camera_photoneo import PhotoneoCamera
+            cameras[key] = PhotoneoCamera(cfg)
+
         else:
             try:
                 cameras[key] = cast(Camera, make_device_from_device_class(cfg))
