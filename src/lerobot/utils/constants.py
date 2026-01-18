@@ -27,6 +27,11 @@ OBS_LANGUAGE = OBS_STR + ".language"
 OBS_LANGUAGE_TOKENS = OBS_LANGUAGE + ".tokens"
 OBS_LANGUAGE_ATTENTION_MASK = OBS_LANGUAGE + ".attention_mask"
 
+# add point cloud 
+OBS_POINT_CLOUD = OBS_STR + ".point_cloud"
+OBS_POINT_CLOUD_XYZ = OBS_POINT_CLOUD + ".xyz"
+OBS_POINT_CLOUD_RGB = OBS_POINT_CLOUD + ".rgb"
+
 ACTION = "action"
 REWARD = "next.reward"
 TRUNCATED = "next.truncated"

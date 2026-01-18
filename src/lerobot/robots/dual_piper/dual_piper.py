@@ -80,6 +80,20 @@ class DualPiper(Robot):
         # 创建 robot 是否连接的标志位
         self.is_robot_connected = False
 
+        self.point_cloud_camera = None
+        if hasattr(config, 'point_cloud') and config.point_cloud.enabled:
+            self._init_point_cloud_camera()
+        
+    @property
+    def _point_cloud_ft(self) -> dict[str, tuple]:
+        if self.point_cloud_camera is None:
+            return {}
+        
+        pcd_cfg = self.config.point_cloud
+        return {
+            "observation.point_cloud": (pcd_cfg.num_points, 3),  # (2048, 3)
+        }
+    
     @property
     def _motors_ft(self) -> dict[str, type]:
         return {k: float for k in self.motors.keys()}
@@ -92,7 +106,7 @@ class DualPiper(Robot):
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
-        return {**self._motors_ft, **self._cameras_ft}
+        return {**self._motors_ft, **self._cameras_ft, **self._point_cloud_ft}
 
     @cached_property
     def action_features(self) -> dict[str, type]:
@@ -184,6 +198,37 @@ class DualPiper(Robot):
         
         action_dict = self.motors.copy()
         return action_dict
+    
+    def _init_point_cloud_camera(self):
+        """初始化点云相机"""
+        pcd_cfg = self.config.point_cloud
+        
+        if pcd_cfg.camera_type == "photoneo":
+            from lerobot.cameras.photoneo import PhotoneoCamera
+            
+            self.point_cloud_camera = PhotoneoCamera(
+                dev_id=pcd_cfg.device_id,
+                camera_translation=pcd_cfg.translation,
+                camera_quaternion=pcd_cfg.quaternion,
+                width=pcd_cfg.width,
+                height=pcd_cfg.height,
+            )
+            logger.info(f"✅ Photoneo point cloud camera initialized: {pcd_cfg.device_id}")
+        
+        elif pcd_cfg.camera_type == "zed":
+            from lerobot.cameras.zed import ZedCamera
+            
+            self.point_cloud_camera = ZedCamera(
+                serial_number=pcd_cfg.device_id,
+                camera_translation=pcd_cfg.translation,
+                camera_quaternion=pcd_cfg.quaternion,
+                resolution=pcd_cfg.resolution,
+                depth_mode=pcd_cfg.depth_mode,
+            )
+            logger.info(f"✅ ZED point cloud camera initialized")
+        
+        else:
+            raise ValueError(f"Unsupported point cloud camera: {pcd_cfg.camera_type}")
 
 
     def disconnect(self):

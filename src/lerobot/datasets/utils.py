@@ -428,6 +428,9 @@ def hf_transform_to_torch(items_dict: dict[str, list[Any]]) -> dict[str, list[to
         if isinstance(first_item, PILImage.Image):
             to_tensor = transforms.ToTensor()
             items_dict[key] = [to_tensor(img) for img in items_dict[key]]
+        elif key.startswith("observation.point_cloud"):
+            # 点云数据已经是列表形式，转换为 tensor
+            items_dict[key] = [torch.tensor(pc, dtype=torch.float32) for pc in items_dict[key]]
         elif first_item is None:
             pass
         else:
@@ -580,6 +583,14 @@ def get_hf_features_from_features(features: dict) -> datasets.Features:
             continue
         elif ft["dtype"] == "image":
             hf_features[key] = datasets.Image()
+
+        # add point cloud support
+        elif key.startswith("observation.point_cloud") and ft["shape"][0] is None:
+            # 可变长度的点云数据: (N, 3) -> Sequence of Sequence
+            hf_features[key] = datasets.Sequence(
+                datasets.Sequence(datasets.Value(dtype=ft["dtype"]))
+            )
+
         elif ft["shape"] == (1,):
             hf_features[key] = datasets.Value(dtype=ft["dtype"])
         elif len(ft["shape"]) == 1:
@@ -1051,11 +1062,37 @@ def validate_feature_dtype_and_shape(
         return validate_feature_numpy_array(name, expected_dtype, expected_shape, value)
     elif expected_dtype in ["image", "video"]:
         return validate_feature_image_or_video(name, expected_shape, value)
+    elif name.startswith("observation.point_cloud"):
+        return validate_feature_point_cloud(name, expected_dtype, expected_shape, value)
     elif expected_dtype == "string":
         return validate_feature_string(name, value)
     else:
         raise NotImplementedError(f"The feature dtype '{expected_dtype}' is not implemented yet.")
 
+def validate_feature_point_cloud(
+    name: str, expected_dtype: str, expected_shape: tuple, value: np.ndarray
+) -> str:
+    """Validate a point cloud feature (variable length array)."""
+    error_message = ""
+    
+    if not isinstance(value, np.ndarray):
+        error_message += f"The feature '{name}' is expected to be of type 'np.ndarray', but type '{type(value)}' provided instead.\n"
+        return error_message
+    
+    # 检查维度
+    if len(value.shape) != 2:
+        error_message += f"The feature '{name}' should be 2D array (N, 3), but got shape {value.shape}.\n"
+        return error_message
+    
+    # 检查第二维度（应该是3: xyz 或 rgb）
+    if value.shape[1] != 3:
+        error_message += f"The feature '{name}' second dimension should be 3 (xyz or rgb), but got {value.shape[1]}.\n"
+    
+    # 检查数据类型
+    if value.dtype != np.dtype(expected_dtype):
+        error_message += f"The feature '{name}' dtype is '{value.dtype}', expected '{expected_dtype}'.\n"
+    
+    return error_message
 
 def validate_feature_numpy_array(
     name: str, expected_dtype: str, expected_shape: list[int], value: np.ndarray
