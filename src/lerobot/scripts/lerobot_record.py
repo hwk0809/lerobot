@@ -521,6 +521,14 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
 
 def main():
+    
+    import multiprocessing
+    try:
+        if multiprocessing.get_start_method(allow_none=True) != 'spawn':
+            multiprocessing.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
+
     register_third_party_devices()
     record()
 

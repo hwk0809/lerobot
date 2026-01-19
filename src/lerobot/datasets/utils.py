@@ -1058,12 +1058,12 @@ def validate_feature_dtype_and_shape(
     """
     expected_dtype = feature["dtype"]
     expected_shape = feature["shape"]
-    if is_valid_numpy_dtype_string(expected_dtype):
+    if name.startswith("observation.point_cloud"):
+        return validate_feature_point_cloud(name, expected_dtype, expected_shape, value)
+    elif is_valid_numpy_dtype_string(expected_dtype):
         return validate_feature_numpy_array(name, expected_dtype, expected_shape, value)
     elif expected_dtype in ["image", "video"]:
         return validate_feature_image_or_video(name, expected_shape, value)
-    elif name.startswith("observation.point_cloud"):
-        return validate_feature_point_cloud(name, expected_dtype, expected_shape, value)
     elif expected_dtype == "string":
         return validate_feature_string(name, value)
     else:
@@ -1079,10 +1079,16 @@ def validate_feature_point_cloud(
         error_message += f"The feature '{name}' is expected to be of type 'np.ndarray', but type '{type(value)}' provided instead.\n"
         return error_message
     
-    # 检查维度
+    # 检查维度，严格检查数据形状是否为 (N, 3) 
     if len(value.shape) != 2:
         error_message += f"The feature '{name}' should be 2D array (N, 3), but got shape {value.shape}.\n"
         return error_message
+    
+    # 如果 expected_shape 中指定了具体的点数 (如 (2048, 3))，则检查 N 是否匹配
+    if expected_shape[0] is not None:
+        if value.shape[0] != expected_shape[0]:
+            error_message += f"The feature '{name}' expected {expected_shape[0]} points, but got {value.shape[0]}.\n"
+    
     
     # 检查第二维度（应该是3: xyz 或 rgb）
     if value.shape[1] != 3:

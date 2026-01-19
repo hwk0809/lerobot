@@ -245,30 +245,60 @@ class PhotoneoCamera(Camera):  # ✅ 继承 Camera 基类
             logger.error(f"Failed to configure output structures: {e}")
             raise  # 配置失败应该抛出异常
     
+        # ✅ 启动采集流（只需启动一次）
+        try:
+            self.ia.start()
+            logger.info("Acquisition stream started")
+        except Exception as e:
+            logger.error(f"Failed to start acquisition: {e}")
+            raise
+    
         self._is_connected = True
         logger.success(f"✅ {self} connected")
 
     def read(self, color_mode=None) -> NDArray[Any]:
         """同步读取点云（阻塞）"""
+        # 1. 如果正在停止中，直接返回空，避免进入 fetch
+        if self.stop_event is not None and self.stop_event.is_set():
+             return np.zeros((0, 3), dtype=np.float32)
+
         if not self.is_connected:
             raise RuntimeError(f"{self} is not connected")
         
         try:
-            self.ia.stop()
-            self.ia.start()
+            # ✅ 清空旧的缓冲区（防止队列堆积）
+            while True:
+                try:
+                    # 使用较小的超时，避免在这里卡住
+                    old_buffer = self.ia.fetch(timeout=0.001)  
+                    old_buffer.queue()  # 归还缓冲区
+                    logger.debug("Discarded old buffer")
+                except Exception:
+                    break  # 队列已空
             
+            # 触发一帧采集
+            # logger.debug("Triggering frame...") # 日志太频繁可以注释掉
             self.features.TriggerFrame.execute()
-            buffer = self.ia.fetch(timeout=5.0)
+            
+            # 等待并获取数据
+            # logger.debug("Fetching buffer...")
+            # ⚠️ 关键点：这里可能会因为 disconnect 销毁 handle 而抛出異常
+            buffer = self.ia.fetch(timeout=5.0) 
+            # logger.debug(f"Buffer fetched successfully")
             
             point_cloud_component = buffer.payload.components[2]
             
             if point_cloud_component.width == 0 or point_cloud_component.height == 0:
                 logger.warning("Empty point cloud captured")
+                buffer.queue()  # ✅ 归还缓冲区
                 return np.zeros((0, 3), dtype=np.float32)
             
             point_cloud_cam = point_cloud_component.data.reshape(
                 point_cloud_component.height * point_cloud_component.width, 3
             ).copy()
+            
+            # ✅ 归还缓冲区
+            buffer.queue()
             
             # mm -> m
             point_cloud_cam = point_cloud_cam / 1000.0
@@ -286,8 +316,26 @@ class PhotoneoCamera(Camera):  # ✅ 继承 Camera 基类
             else:
                 return point_cloud_cam
             
+        except KeyboardInterrupt:
+            # 允许 Ctrl+C 向上传播
+            raise  
         except Exception as e:
-            logger.error(f"Failed to read point cloud: {e}")
+            # ✅ 修复核心崩溃逻辑：
+            # 如果错误信息包含 handle 丢失，且我们要停止了，这是一个预期的退出行为
+            error_msg = str(e)
+            is_shutdown_error = "InvalidHandleException" in error_msg or "ID: -1006" in error_msg or "Requested handle not found" in error_msg
+            
+            if is_shutdown_error:
+                if self.stop_event is not None and self.stop_event.is_set():
+                    # 这是一个正常的关闭过程中的冲突，忽略它
+                    return np.zeros((0, 3), dtype=np.float32)
+                else:
+                    logger.warning(f"GenTL Handle lost (unexpected): {e}")
+                    return np.zeros((0, 3), dtype=np.float32)
+
+            import traceback
+            logger.error(f"Failed to read point cloud: {type(e).__name__}: {e}")
+            logger.debug(traceback.format_exc())  # 详细堆栈
             return np.zeros((0, 3), dtype=np.float32)
     
     def _read_loop(self) -> None:
@@ -295,20 +343,47 @@ class PhotoneoCamera(Camera):  # ✅ 继承 Camera 基类
         if self.stop_event is None:
             raise RuntimeError("stop_event not initialized")
         
+        consecutive_errors = 0
+        max_consecutive_errors = 3
+        
         while not self.stop_event.is_set():
             try:
                 frame = self.read()
-                with self.frame_lock:
-                    self.latest_frame = frame
-                self.new_frame_event.set()
+                
+                # ✅ 只有成功且点云非空时才更新
+                if len(frame) > 0:
+                    with self.frame_lock:
+                        self.latest_frame = frame
+                    self.new_frame_event.set()
+                    consecutive_errors = 0  # 重置错误计数
+                else:
+                    # 如果返回空，并且已经在停止过程中，直接跳出
+                    if self.stop_event.is_set():
+                        break
+
+                    consecutive_errors += 1
+                    # 降低日志级别，避免刷屏
+                    # logger.warning(f"Empty point cloud ({consecutive_errors}/{max_consecutive_errors})")
+                
             except KeyboardInterrupt:
-                # ✅ 捕获 Ctrl+C，优雅退出
                 logger.info("Keyboard interrupt in read loop, stopping...")
                 break
             except Exception as e:
-                if not self.stop_event.is_set():  # ✅ 只在非主动停止时报错
-                    logger.error(f"Error in read loop: {e}")
-                time.sleep(0.1)
+                # 再次检查停止信号
+                if self.stop_event.is_set():
+                    break
+
+                consecutive_errors += 1
+                if not self.stop_event.is_set():
+                    logger.error(f"Error in read loop ({consecutive_errors}/{max_consecutive_errors}): {e}")
+                
+                # ✅ 连续失败时增加休眠时间
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.error("Too many consecutive errors, pausing for 1 second...")
+                    time.sleep(1.0)
+                    consecutive_errors = 0
+                else:
+                    time.sleep(0.1)
         
         logger.info("Read loop stopped")
 
@@ -345,7 +420,14 @@ class PhotoneoCamera(Camera):  # ✅ 继承 Camera 基类
         if self.thread is None or not self.thread.is_alive():
             self._start_read_thread()
         
-        if not self.new_frame_event.wait(timeout=timeout_ms / 1000.0):
+        # ✅ 使用可中断的等待（分段超时，便于响应 Ctrl+C）
+        timeout_sec = timeout_ms / 1000.0
+        start_time = time.time()
+        
+        while (time.time() - start_time) < timeout_sec:
+            if self.new_frame_event.wait(timeout=0.1):  # 100ms 片段
+                break
+        else:
             raise TimeoutError(f"Timeout waiting for frame from {self}")
         
         with self.frame_lock:
@@ -359,41 +441,48 @@ class PhotoneoCamera(Camera):  # ✅ 继承 Camera 基类
     def disconnect(self) -> None:
         """断开相机连接"""
         if not self.is_connected and self.thread is None:
-            logger.warning(f"{self} already disconnected")
             return
         
-        # ✅ 先停止后台线程
+        logger.info(f"Disconnecting {self}...")
+
+        # 1. 立即设置标志位，通知所有 loop 我们正在退出
+        if self.stop_event is not None:
+            self.stop_event.set()
+        
+        self._is_connected = False # 防止新的 read 调用
+
+        # 2. 尝试等待线程结束
         if self.thread is not None:
-            logger.info("Stopping background thread...")
-            self._stop_read_thread()
-        
-        # ✅ 立即设置断开状态
-        self._is_connected = False
-        
+            if self.thread.is_alive():
+                # 我们只等待很短的时间。如果 fetch 卡住了 (5s timeout)，join 会超时。
+                # 我们不想让主程序卡死在这里，所以超时时间设短一点。
+                self.thread.join(timeout=0.5) 
+            self.thread = None
+
         try:
-            # 停止采集流
+            # 3. 停止采集流
+            # 注意：如果线程还在 fetch 中，这里 stop 可能会导致 InvalidHandleException，
+            # 但我们在 read() 里已经 catch 住了。
             if self.ia is not None:
+                # logger.info("Stopping acquisition stream...")
                 try:
-                    logger.info("Stopping acquisition...")
                     self.ia.stop()
-                except Exception as e:
-                    logger.debug(f"Error stopping acquisition: {e}")  # ✅ 降级为 debug
+                except Exception:
+                    pass # 忽略停止时的错误
             
                 try:
-                    logger.info("Destroying image acquirer...")
-                    self.ia.destroy()
-                except Exception as e:
-                    logger.debug(f"Error destroying image acquirer: {e}")
+                    self.ia.destroy() # 这步是由于 Core Dump 的高风险区
+                except Exception:
+                    pass
                 finally:
                     self.ia = None
         
-            # 重置 Harvester
+            # 4. 重置 Harvester
             if self.h is not None:
                 try:
-                    logger.info("Resetting Harvester...")
                     self.h.reset()
-                except Exception as e:
-                    logger.debug(f"Error resetting Harvester: {e}")
+                except Exception:
+                    pass
                 finally:
                     self.h = None
         
@@ -401,8 +490,6 @@ class PhotoneoCamera(Camera):  # ✅ 继承 Camera 基类
             logger.success(f"{self} disconnected successfully")
             
         except KeyboardInterrupt:
-            # ✅ 处理 Ctrl+C
-            logger.warning("Disconnect interrupted by user")
             raise
         except Exception as e:
             logger.error(f"Error during disconnect: {e}")

@@ -45,6 +45,10 @@ from piper_sdk import *
 logger = logging.getLogger(__name__)
 
 
+import sys
+sys.path.insert(0, '/home/ps/workspace/whr/deformable_bench')
+from common.vision_utils import process_point_cloud
+
 class DualPiper(Robot):
     """
     Designed by cfy, jzh
@@ -92,7 +96,11 @@ class DualPiper(Robot):
         
         pcd_cfg = self.config.point_cloud
         return {
-            "observation.point_cloud": (pcd_cfg.num_points, 3),  # (2048, 3)
+            "observation.point_cloud": {
+                "dtype": "float32",
+                "shape": (pcd_cfg.num_points, 3),
+                "names": None
+            }
         }
     
     @property
@@ -208,11 +216,11 @@ class DualPiper(Robot):
                 raw_pcd = self.point_cloud_camera.async_read(timeout_ms=2000)
                 
                 # ✅ 使用你的处理函数
-                from common.vision_utils import process_point_cloud
+                # from common.vision_utils import process_point_cloud
                 processed_pcd = process_point_cloud(
                     raw_pcd,
                     num_points=self.config.point_cloud.num_points,
-                    use_gpu=True,
+                    use_gpu=False,
                     visualize=False
                 )
                 obs_dict["observation.point_cloud"] = processed_pcd
