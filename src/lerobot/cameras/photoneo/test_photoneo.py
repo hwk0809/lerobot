@@ -210,7 +210,7 @@ def test_photoneo_with_processing(config: PhotoneoCameraConfig, args):
     try:
         project_root_parent = Path(__file__).resolve().parents[5]
         sys.path.insert(0, str(project_root_parent))
-        from common.vision_utils import process_point_cloud
+        from common.pcd_utils import process_point_cloud
         logger.success("✅ 成功导入 process_point_cloud")
     except ImportError as e:
         logger.warning(f"⚠️  无法导入 process_point_cloud: {e}")

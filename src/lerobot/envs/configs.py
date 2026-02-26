@@ -327,6 +327,57 @@ class LiberoEnv(EnvConfig):
         }
 
 
+@EnvConfig.register_subclass("deformable")
+@dataclass
+class DeformableEnv(EnvConfig):
+    task: str | None = "silk_flatten"
+    fps: int = 25
+    episode_length: int = 500
+    obs_type: str = "state_pcd"  # "state", "state_pcd", "state_pcd_pixels"
+    render_mode: str = "rgb_array"
+    xml_path: str = "assets/mujoco_model/dual_piper_with_silk_camera.xml"
+    camera_name: str = "photoneo_cam"
+    include_point_cloud: bool = True
+    num_points: int = 2048
+    observation_height: int = 480
+    observation_width: int = 640
+    features: dict[str, PolicyFeature] = field(
+        default_factory=lambda: {
+            ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(14,)),
+            "agent_pos": PolicyFeature(type=FeatureType.STATE, shape=(14,)),
+        }
+    )
+    features_map: dict[str, str] = field(
+        default_factory=lambda: {
+            ACTION: ACTION,
+            "agent_pos": OBS_STATE,
+        }
+    )
+
+    def __post_init__(self):
+        if "pcd" in self.obs_type and self.include_point_cloud:
+            self.features["point_cloud"] = PolicyFeature(type=FeatureType.STATE, shape=(self.num_points, 3))
+        if "pixels" in self.obs_type:
+            self.features[f"pixels/{self.camera_name}"] = PolicyFeature(
+                type=FeatureType.VISUAL, shape=(self.observation_height, self.observation_width, 3)
+            )
+
+    @property
+    def gym_kwargs(self) -> dict:
+        return {
+            "task": self.task,
+            "obs_type": self.obs_type,
+            "render_mode": self.render_mode,
+            "max_episode_steps": self.episode_length,
+            "xml_path": self.xml_path,
+            "camera_name": self.camera_name,
+            "include_point_cloud": self.include_point_cloud,
+            "num_points": self.num_points,
+            "img_height": self.observation_height,
+            "img_width": self.observation_width,
+        }
+
+
 @EnvConfig.register_subclass("metaworld")
 @dataclass
 class MetaworldEnv(EnvConfig):

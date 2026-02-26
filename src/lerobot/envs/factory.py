@@ -19,7 +19,7 @@ from typing import Any
 import gymnasium as gym
 from gymnasium.envs.registration import registry as gym_registry
 
-from lerobot.envs.configs import AlohaEnv, EnvConfig, LiberoEnv, PushtEnv
+from lerobot.envs.configs import AlohaEnv, DeformableEnv, EnvConfig, LiberoEnv, PushtEnv
 from lerobot.envs.utils import _call_make_env, _download_hub_file, _import_hub_module, _normalize_hub_result
 from lerobot.processor import ProcessorStep
 from lerobot.processor.env_processor import LiberoProcessorStep
@@ -33,6 +33,8 @@ def make_env_config(env_type: str, **kwargs) -> EnvConfig:
         return PushtEnv(**kwargs)
     elif env_type == "libero":
         return LiberoEnv(**kwargs)
+    elif env_type == "deformable":
+        return DeformableEnv(**kwargs)
     else:
         raise ValueError(f"Policy type '{env_type}' is not available.")
 
@@ -137,6 +139,14 @@ def make_env(
             gym_kwargs=cfg.gym_kwargs,
             env_cls=env_cls,
         )
+    elif "deformable" in cfg.type:
+        from lerobot.envs.deformable import DeformableClothEnv
+
+        def _make_deformable():
+            return DeformableClothEnv(**(cfg.gym_kwargs or {}))
+
+        vec = env_cls([_make_deformable for _ in range(n_envs)], autoreset_mode=gym.vector.AutoresetMode.SAME_STEP)
+        return {"deformable": {0: vec}}
     elif "metaworld" in cfg.type:
         from lerobot.envs.metaworld import create_metaworld_envs
 

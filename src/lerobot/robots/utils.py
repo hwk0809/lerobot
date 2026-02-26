@@ -64,6 +64,9 @@ def make_robot_from_config(config: RobotConfig) -> Robot:
     elif config.type == "dual_piper":
         from .dual_piper import DualPiper
         return DualPiper(config)
+    elif config.type == "sim_dual_piper_deformable":
+        from .sim_dual_piper_deformable import SimDualPiperDeformable
+        return SimDualPiperDeformable(config)
     else:
         try:
             return cast(Robot, make_device_from_device_class(config))
