@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import concurrent.futures
 import logging
 import time
 from functools import cached_property
@@ -47,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 import sys
 sys.path.insert(0, '/home/ps/workspace/whr/deformable_bench')
-from common.vision_utils import process_point_cloud
+from common.pcd_utils import process_point_cloud
 
 class DualPiper(Robot):
     """
@@ -86,6 +87,10 @@ class DualPiper(Robot):
         self.is_robot_connected = False
 
         self.point_cloud_camera = None
+        self._pcd_executor = None
+        self._pcd_future = None
+        self._last_processed_pcd = None
+        self._last_obs_time = None
         if hasattr(config, 'point_cloud') and config.point_cloud.enabled:
             self._init_point_cloud_camera()
         
@@ -151,7 +156,10 @@ class DualPiper(Robot):
         if self.point_cloud_camera is not None:
             logger.info("Connecting point cloud sensor...")
             self.point_cloud_camera.connect()
-            logger.info("✅ Point cloud sensor connected")
+            self._pcd_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="pcd_proc"
+            )
+            logger.info("✅ Point cloud sensor connected (async processing enabled)")
         logger.info(f"{self} connected.")
 
     @property
@@ -169,6 +177,18 @@ class DualPiper(Robot):
     def get_observation(self) -> dict[str, Any]:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
+
+        # FPS 监控
+        now = time.perf_counter()
+        if self._last_obs_time is not None:
+            actual_dt = now - self._last_obs_time
+            expected_dt = 1.0 / getattr(self.config, 'fps', 25)
+            if actual_dt > 1.5 * expected_dt:
+                logger.warning(
+                    f"Observation slow: {actual_dt*1000:.0f}ms "
+                    f"(target: {expected_dt*1000:.0f}ms)"
+                )
+        self._last_obs_time = now
 
         # Read arm position
         start = time.perf_counter()
@@ -207,44 +227,50 @@ class DualPiper(Robot):
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
         
-        # ✅ Capture point cloud
+        # ✅ Capture point cloud (async processing — returns latest processed result)
+        # TODO(性能优化): 当前 process_point_cloud CPU 耗时 ~60ms，超过 25Hz 帧预算(40ms)，
+        #   因此采用异步后处理，点云更新频率 ~16Hz（每 60ms 一次），主线程保持 25Hz。
+        #   若未来将处理时间优化到 <30ms（如: 去掉 outlier removal + 启用 GPU FPS），
+        #   可回归同步模式消除延迟。
+        #
+        # 防积压设计：只在上一个任务完成后才提交新任务，否则跳过本帧提交，复用缓存结果。
+        # 这样后台线程永远只有 1 个任务在跑，不会队列堆积导致延迟越来越大。
         if self.point_cloud_camera is not None:
             start = time.perf_counter()
-            
+            num_points = self.config.point_cloud.num_points
+            zero_pcd = np.zeros((num_points, 3), dtype=np.float32)
+
             try:
-                # 异步读取原始点云（已应用外参）
-                raw_pcd = self.point_cloud_camera.async_read(timeout_ms=2000)
-                
-                # ✅ 使用你的处理函数
-                from common.pcd_utils import process_point_cloud
-                processed_pcd = process_point_cloud(
-                    raw_pcd,
-                    num_points=self.config.point_cloud.num_points,
-                    use_gpu=False,
-                    visualize=False
-                )
-                obs_dict["observation.point_cloud"] = processed_pcd
+                # 只在上一个任务完成（或首次）时才提交新任务，防止队列积压
+                if self._pcd_future is None or self._pcd_future.done():
+                    # 取上一个任务的结果
+                    if self._pcd_future is not None:
+                        try:
+                            self._last_processed_pcd = self._pcd_future.result()
+                        except Exception as e:
+                            logger.error(f"Point cloud processing failed: {e}")
+
+                    # 读取新的原始点云并提交后处理
+                    raw_pcd = self.point_cloud_camera.async_read(timeout_ms=2000)
+                    self._pcd_future = self._pcd_executor.submit(
+                        process_point_cloud, raw_pcd,
+                        num_points=num_points,
+                        use_gpu=False, visualize=False
+                    )
+                # else: 上一个任务还在处理中，跳过本帧提交，复用缓存结果
+
+                # 返回最新的已处理结果（第一帧返回零点云）
+                if self._last_processed_pcd is not None:
+                    obs_dict["observation.point_cloud"] = self._last_processed_pcd
+                else:
+                    obs_dict["observation.point_cloud"] = zero_pcd
 
                 dt_ms = (time.perf_counter() - start) * 1e3
-                logger.info(
-                f"Point cloud captured: "
-                f"raw={raw_pcd.shape[0]} points, "
-                f"processed={processed_pcd.shape[0]} points, "
-                f"time={dt_ms:.1f}ms, "
-                f"range=[X:{processed_pcd[:, 0].min():.3f}~{processed_pcd[:, 0].max():.3f}, "
-                f"Y:{processed_pcd[:, 1].min():.3f}~{processed_pcd[:, 1].max():.3f}, "
-                f"Z:{processed_pcd[:, 2].min():.3f}~{processed_pcd[:, 2].max():.3f}]"
-                )
-                
-                dt_ms = (time.perf_counter() - start) * 1e3
-                logger.debug(f"{self} read point_cloud: {dt_ms:.1f}ms")
-                
+                logger.debug(f"{self} read point_cloud (async): {dt_ms:.1f}ms")
+
             except Exception as e:
                 logger.error(f"Failed to read point cloud: {e}")
-                # 失败时返回空点云
-                obs_dict["observation.point_cloud"] = np.zeros(
-                    (self.config.point_cloud.num_points, 3), dtype=np.float32
-                )
+                obs_dict["observation.point_cloud"] = zero_pcd
 
         return obs_dict
 
@@ -300,9 +326,18 @@ class DualPiper(Robot):
 
         for cam in self.cameras.values():
             cam.disconnect()
-        
+
         if self.point_cloud_camera is not None:
             logger.info("Disconnecting point cloud sensor...")
+            # 等待后台点云处理完成
+            if self._pcd_future is not None:
+                try:
+                    self._pcd_future.result(timeout=5)
+                except Exception:
+                    pass
+            if self._pcd_executor is not None:
+                self._pcd_executor.shutdown(wait=True)
+                self._pcd_executor = None
             self.point_cloud_camera.disconnect()
             logger.info("✅ Point cloud sensor disconnected")
 
