@@ -20,6 +20,9 @@ import shutil
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 import tqdm
 
 from lerobot.datasets.compute_stats import aggregate_stats
@@ -106,7 +109,7 @@ def update_meta_data(
     df,
     dst_meta,
     meta_idx,
-    data_idx,
+    data_file_mapping,
     videos_idx,
 ):
     """Updates metadata DataFrame with new chunk, file, and timestamp indices.
@@ -118,17 +121,27 @@ def update_meta_data(
         df: DataFrame containing the metadata to be updated.
         dst_meta: Destination dataset metadata.
         meta_idx: Dictionary containing current metadata chunk and file indices.
-        data_idx: Dictionary containing current data chunk and file indices.
+        data_file_mapping: Dict mapping (src_chunk, src_file) -> (dst_chunk, dst_file)
+            for data files. Built by aggregate_data().
         videos_idx: Dictionary containing current video indices and timestamps.
 
     Returns:
         pd.DataFrame: Updated DataFrame with adjusted indices and timestamps.
     """
 
-    df["meta/episodes/chunk_index"] = df["meta/episodes/chunk_index"] + meta_idx["chunk"]
-    df["meta/episodes/file_index"] = df["meta/episodes/file_index"] + meta_idx["file"]
-    df["data/chunk_index"] = df["data/chunk_index"] + data_idx["chunk"]
-    df["data/file_index"] = df["data/file_index"] + data_idx["file"]
+    df["meta/episodes/chunk_index"] = meta_idx["chunk"]
+    df["meta/episodes/file_index"] = meta_idx["file"]
+
+    # Remap data file indices using the src→dst mapping from aggregate_data
+    new_data_chunks = []
+    new_data_files = []
+    for i in df.index:
+        src_key = (int(df.at[i, "data/chunk_index"]), int(df.at[i, "data/file_index"]))
+        dst_chunk, dst_file = data_file_mapping.get(src_key, src_key)
+        new_data_chunks.append(dst_chunk)
+        new_data_files.append(dst_file)
+    df["data/chunk_index"] = new_data_chunks
+    df["data/file_index"] = new_data_files
     for key, video_idx in videos_idx.items():
         # Store original video file indices before updating
         orig_chunk_col = f"videos/{key}/chunk_index"
@@ -237,9 +250,9 @@ def aggregate_datasets(
 
     for src_meta in tqdm.tqdm(all_metadata, desc="Copy data and videos"):
         videos_idx = aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chunk_size)
-        data_idx = aggregate_data(src_meta, dst_meta, data_idx, data_files_size_in_mb, chunk_size)
+        data_idx, data_file_mapping = aggregate_data(src_meta, dst_meta, data_idx, data_files_size_in_mb, chunk_size)
 
-        meta_idx = aggregate_metadata(src_meta, dst_meta, meta_idx, data_idx, videos_idx)
+        meta_idx = aggregate_metadata(src_meta, dst_meta, meta_idx, videos_idx, data_file_mapping)
 
         dst_meta.info["total_episodes"] += src_meta.total_episodes
         dst_meta.info["total_frames"] += src_meta.total_frames
@@ -346,8 +359,10 @@ def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chu
 def aggregate_data(src_meta, dst_meta, data_idx, data_files_size_in_mb, chunk_size):
     """Aggregates data chunks from a source dataset into the destination dataset.
 
-    Reads source data files, updates indices to match the aggregated dataset,
-    and writes them to the destination with proper file rotation.
+    Uses pyarrow instead of pandas to correctly handle nested array types
+    (e.g., point cloud Array2D columns) that pandas cannot concat/write.
+    This change is backward-compatible — pyarrow handles all parquet types
+    including simple float/int columns used by RGB-only datasets.
 
     Args:
         src_meta: Source dataset metadata.
@@ -355,7 +370,8 @@ def aggregate_data(src_meta, dst_meta, data_idx, data_files_size_in_mb, chunk_si
         data_idx: Dictionary tracking data chunk and file indices.
 
     Returns:
-        dict: Updated data_idx with current chunk and file indices.
+        tuple: (data_idx, data_file_mapping) where data_idx is the updated index dict
+            and data_file_mapping maps (src_chunk, src_file) -> (dst_chunk, dst_file).
     """
     unique_chunk_file_ids = {
         (c, f)
@@ -365,29 +381,127 @@ def aggregate_data(src_meta, dst_meta, data_idx, data_files_size_in_mb, chunk_si
     }
 
     unique_chunk_file_ids = sorted(unique_chunk_file_ids)
+    data_file_mapping = {}
 
     for src_chunk_idx, src_file_idx in unique_chunk_file_ids:
         src_path = src_meta.root / DEFAULT_DATA_PATH.format(
             chunk_index=src_chunk_idx, file_index=src_file_idx
         )
-        df = pd.read_parquet(src_path)
-        df = update_data_df(df, src_meta, dst_meta)
+        # NOTE: 使用 pyarrow 而非 pandas 读取，保留 Arrow 嵌套数组 schema
+        # （如点云 Array2D 列）。pandas 读取会丢失 extension type metadata。
+        table = pq.read_table(src_path)
+        table = _update_data_table(table, src_meta, dst_meta)
 
-        data_idx = append_or_create_parquet_file(
-            df,
+        data_idx = _append_or_create_arrow_file(
+            table,
             src_path,
             data_idx,
             data_files_size_in_mb,
             chunk_size,
             DEFAULT_DATA_PATH,
-            contains_images=len(dst_meta.image_keys) > 0,
             aggr_root=dst_meta.root,
         )
 
-    return data_idx
+        data_file_mapping[(src_chunk_idx, src_file_idx)] = (data_idx["chunk"], data_idx["file"])
+
+    return data_idx, data_file_mapping
 
 
-def aggregate_metadata(src_meta, dst_meta, meta_idx, data_idx, videos_idx):
+def _update_data_table(table: pa.Table, src_meta, dst_meta) -> pa.Table:
+    """PyArrow version of update_data_df — preserves nested array schemas.
+
+    Unlike the pandas version (update_data_df), this operates on Arrow Tables
+    directly, which correctly preserves nested array types like Array2D for
+    point cloud columns throughout the read-update-write pipeline.
+
+    Args:
+        table: Arrow Table containing the data to be updated.
+        src_meta: Source dataset metadata.
+        dst_meta: Destination dataset metadata.
+
+    Returns:
+        pa.Table: Updated table with adjusted indices.
+    """
+    # Update episode_index
+    idx = table.schema.get_field_index("episode_index")
+    table = table.set_column(
+        idx, "episode_index",
+        pc.add(table.column("episode_index"), dst_meta.info["total_episodes"]),
+    )
+
+    # Update index (global frame index)
+    idx = table.schema.get_field_index("index")
+    table = table.set_column(
+        idx, "index",
+        pc.add(table.column("index"), dst_meta.info["total_frames"]),
+    )
+
+    # Update task_index via mapping (uses numpy intermediate for the lookup)
+    task_indices = table.column("task_index").to_numpy()
+    src_task_names = src_meta.tasks.index.take(task_indices)
+    new_task_indices = dst_meta.tasks.loc[src_task_names, "task_index"].to_numpy()
+    idx = table.schema.get_field_index("task_index")
+    table = table.set_column(
+        idx, "task_index",
+        pa.array(new_task_indices, type=table.schema.field("task_index").type),
+    )
+
+    return table
+
+
+def _append_or_create_arrow_file(
+    table: pa.Table,
+    src_path: Path,
+    idx: dict[str, int],
+    max_mb: float,
+    chunk_size: int,
+    default_path: str,
+    aggr_root: Path = None,
+) -> dict:
+    """PyArrow version of append_or_create_parquet_file — handles nested array types.
+
+    Uses pa.concat_tables() and pq.write_table() instead of pd.concat() and
+    df.to_parquet(), which fail on nested array columns like point cloud Array2D.
+    Backward-compatible with all parquet types (float, int, images, etc.).
+
+    Args:
+        table: Arrow Table to write.
+        src_path: Path to the source file (used for size estimation).
+        idx: Dictionary containing current 'chunk' and 'file' indices.
+        max_mb: Maximum allowed file size in MB before rotation.
+        chunk_size: Maximum number of files per chunk.
+        default_path: Format string for generating file paths.
+        aggr_root: Root path for the aggregated dataset.
+
+    Returns:
+        dict: Updated index dictionary with current chunk and file indices.
+    """
+    dst_path = aggr_root / default_path.format(chunk_index=idx["chunk"], file_index=idx["file"])
+
+    if not dst_path.exists():
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, dst_path, compression="snappy")
+        return idx
+
+    src_size = get_parquet_file_size_in_mb(src_path)
+    dst_size = get_parquet_file_size_in_mb(dst_path)
+
+    if dst_size + src_size >= max_mb:
+        # Size limit exceeded: rotate to next chunk/file
+        idx["chunk"], idx["file"] = update_chunk_file_indices(idx["chunk"], idx["file"], chunk_size)
+        new_path = aggr_root / default_path.format(chunk_index=idx["chunk"], file_index=idx["file"])
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, new_path, compression="snappy")
+    else:
+        # Append: read existing as Arrow table, concat, rewrite
+        existing_table = pq.read_table(dst_path)
+        merged = pa.concat_tables([existing_table, table], promote_options="default")
+        pq.write_table(merged, dst_path, compression="snappy")
+
+    return idx
+
+
+def aggregate_metadata(src_meta, dst_meta, meta_idx, videos_idx, data_file_mapping):
     """Aggregates metadata from a source dataset into the destination dataset.
 
     Reads source metadata files, updates all indices and timestamps,
@@ -397,8 +511,9 @@ def aggregate_metadata(src_meta, dst_meta, meta_idx, data_idx, videos_idx):
         src_meta: Source dataset metadata.
         dst_meta: Destination dataset metadata.
         meta_idx: Dictionary tracking metadata chunk and file indices.
-        data_idx: Dictionary tracking data chunk and file indices.
         videos_idx: Dictionary tracking video indices and timestamps.
+        data_file_mapping: Dict mapping (src_chunk, src_file) -> (dst_chunk, dst_file)
+            for data files. Built by aggregate_data().
 
     Returns:
         dict: Updated meta_idx with current chunk and file indices.
@@ -420,7 +535,7 @@ def aggregate_metadata(src_meta, dst_meta, meta_idx, data_idx, videos_idx):
             df,
             dst_meta,
             meta_idx,
-            data_idx,
+            data_file_mapping,
             videos_idx,
         )
 
