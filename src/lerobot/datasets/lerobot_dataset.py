@@ -1025,6 +1025,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx) -> dict:
         # Ensure dataset is loaded when we actually need to read from it
         self._ensure_hf_dataset_loaded()
+        # Remap absolute index to relative index when dataset is filtered by episodes
+        if self._absolute_to_relative_idx is not None:
+            idx = self._absolute_to_relative_idx[idx]
         item = self.hf_dataset[idx]
         ep_idx = item["episode_index"].item()
 
