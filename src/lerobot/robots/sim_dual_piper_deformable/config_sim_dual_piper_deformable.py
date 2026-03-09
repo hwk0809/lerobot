@@ -9,7 +9,7 @@ class SimDualPiperDeformableConfig(RobotConfig):
     """Configuration for the simulated Dual Piper robot with Style3D deformable physics."""
 
     # MuJoCo + Style3D environment
-    xml_path: str = "assets/mujoco_model/dual_piper_with_silk_camera.xml"
+    xml_path: str = "assets/mujoco_model/dual_piper_with_green_tshirt_rgb.xml"
     urdf_path: str = "assets/Urdf/piper_description/piper_with_gripper.urdf"
 
     # Physics
@@ -19,9 +19,15 @@ class SimDualPiperDeformableConfig(RobotConfig):
 
     # Camera / RGB
     camera_name: str = "photoneo_cam"
+    camera_names: list[str] = field(default_factory=lambda: [])
     img_width: int = 640
     img_height: int = 480
     include_rgb: bool = True
+
+    @property
+    def effective_camera_names(self) -> list[str]:
+        """Return camera_names if set, otherwise fallback to [camera_name]."""
+        return self.camera_names if self.camera_names else [self.camera_name]
 
     # Point Cloud
     include_point_cloud: bool = True
@@ -39,17 +45,17 @@ class SimDualPiperDeformableConfig(RobotConfig):
         "enabled": True,
         "target_body_name": "cloth",
         "pos_rand": {
-            "enabled": True,
+            "enabled": False,
             "range_x": [-0.1, 0.1],
             "range_y": [-0.1, 0.1],
         },
         "rot_rand": {
-            "enabled": True,
+            "enabled": False,
         },
         "dynamic_settle": {
             "enabled": True,
-            "pin_duration": 1.0,
-            "settle_duration": 1.5,
+            "pin_duration": 0.1,
+            "settle_duration": 0.1,
         },
     })
 

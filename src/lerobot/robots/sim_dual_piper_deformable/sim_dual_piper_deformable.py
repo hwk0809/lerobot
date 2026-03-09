@@ -78,11 +78,12 @@ class SimDualPiperDeformable(Robot):
         if self.config.include_point_cloud:
             ft["observation.point_cloud"] = (self.config.num_points, 3)
         if self.config.include_rgb:
-            ft[f"observation.images.{self.config.camera_name}"] = (
-                self.config.img_height,
-                self.config.img_width,
-                3,
-            )
+            for cam_name in self.config.effective_camera_names:
+                ft[f"observation.images.{cam_name}"] = (
+                    self.config.img_height,
+                    self.config.img_width,
+                    3,
+                )
         return ft
 
     @cached_property
@@ -165,9 +166,12 @@ class SimDualPiperDeformable(Robot):
             )
             obs_dict["observation.point_cloud"] = pcd.astype(np.float32)
 
-        # RGB image
-        if self.config.include_rgb and obs.rgb_image is not None:
-            obs_dict[f"observation.images.{self.config.camera_name}"] = obs.rgb_image
+        # RGB images (multi-camera support)
+        if self.config.include_rgb:
+            for cam_name in self.config.effective_camera_names:
+                rgb = self.env._get_camera_rgb(cam_name)
+                if rgb is not None:
+                    obs_dict[f"observation.images.{cam_name}"] = rgb
 
         return obs_dict
 
