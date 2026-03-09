@@ -33,6 +33,12 @@ class SimDualPiperDeformableConfig(RobotConfig):
     include_point_cloud: bool = True
     num_points: int = 2048
 
+    # Style3D credentials
+    style3d: dict = field(default_factory=lambda: {
+        "username": "SHJD_test01_en",
+        "password": "YpCVTFAK",
+    })
+
     # Cloth physics (Style3D parameters)
     cloth_config: dict = field(default_factory=lambda: {
         "stretch_stiff": [40000e-3, 25000e-3, 3000e-3],

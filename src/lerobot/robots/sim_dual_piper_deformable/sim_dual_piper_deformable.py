@@ -238,6 +238,7 @@ class SimDualPiperDeformable(Robot):
             "xml_path": self.config.xml_path,
             "render": self.config.render,
             "camera_name": self.config.camera_name,
+            "style3d": self.config.style3d,
             "cloth_config": self.config.cloth_config,
             "randomization": self.config.randomization,
             "robot_joints": self.config.robot_joints,
