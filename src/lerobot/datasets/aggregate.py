@@ -149,21 +149,32 @@ def update_meta_data(
         df["_orig_chunk"] = df[orig_chunk_col].copy()
         df["_orig_file"] = df[orig_file_col].copy()
 
-        # Update chunk and file indices to point to destination
-        df[orig_chunk_col] = video_idx["chunk"]
-        df[orig_file_col] = video_idx["file"]
-
-        # Apply per-source-file timestamp offsets
+        # Per-row: map each episode to its correct destination file and apply timestamp offset
+        src_to_dst = video_idx.get("src_to_dst", {})
         src_to_offset = video_idx.get("src_to_offset", {})
-        if src_to_offset:
-            # Apply offset based on original source file
+
+        if src_to_dst:
             for idx in df.index:
-                src_key = (df.at[idx, "_orig_chunk"], df.at[idx, "_orig_file"])
+                src_key = (int(df.at[idx, "_orig_chunk"]), int(df.at[idx, "_orig_file"]))
+                dst_chunk, dst_file = src_to_dst.get(src_key, (video_idx["chunk"], video_idx["file"]))
+                df.at[idx, orig_chunk_col] = dst_chunk
+                df.at[idx, orig_file_col] = dst_file
+                offset = src_to_offset.get(src_key, 0)
+                df.at[idx, f"videos/{key}/from_timestamp"] += offset
+                df.at[idx, f"videos/{key}/to_timestamp"] += offset
+        elif src_to_offset:
+            # Fallback: same destination for all, but per-file offsets
+            df[orig_chunk_col] = video_idx["chunk"]
+            df[orig_file_col] = video_idx["file"]
+            for idx in df.index:
+                src_key = (int(df.at[idx, "_orig_chunk"]), int(df.at[idx, "_orig_file"]))
                 offset = src_to_offset.get(src_key, 0)
                 df.at[idx, f"videos/{key}/from_timestamp"] += offset
                 df.at[idx, f"videos/{key}/to_timestamp"] += offset
         else:
             # Fallback to simple offset (for backward compatibility)
+            df[orig_chunk_col] = video_idx["chunk"]
+            df[orig_file_col] = video_idx["file"]
             df[f"videos/{key}/from_timestamp"] = (
                 df[f"videos/{key}/from_timestamp"] + video_idx["latest_duration"]
             )
@@ -281,6 +292,8 @@ def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chu
         videos_idx[key]["episode_duration"] = 0
         # Track offset for each source (chunk, file) pair
         videos_idx[key]["src_to_offset"] = {}
+        # Track destination (chunk, file) for each source (chunk, file) pair
+        videos_idx[key]["src_to_dst"] = {}
 
     for key, video_idx in videos_idx.items():
         unique_chunk_file_pairs = {
@@ -315,6 +328,7 @@ def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chu
             if not dst_path.exists():
                 # Store offset before incrementing
                 videos_idx[key]["src_to_offset"][(src_chunk_idx, src_file_idx)] = current_offset
+                videos_idx[key]["src_to_dst"][(src_chunk_idx, src_file_idx)] = (chunk_idx, file_idx)
                 dst_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy(str(src_path), str(dst_path))
                 videos_idx[key]["episode_duration"] += src_duration
@@ -328,8 +342,9 @@ def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chu
             if dst_size + src_size >= video_files_size_in_mb:
                 # Rotate to a new file, this source becomes start of new destination
                 # So its offset should be 0
-                videos_idx[key]["src_to_offset"][(src_chunk_idx, src_file_idx)] = 0
                 chunk_idx, file_idx = update_chunk_file_indices(chunk_idx, file_idx, chunk_size)
+                videos_idx[key]["src_to_offset"][(src_chunk_idx, src_file_idx)] = 0
+                videos_idx[key]["src_to_dst"][(src_chunk_idx, src_file_idx)] = (chunk_idx, file_idx)
                 dst_path = dst_meta.root / DEFAULT_VIDEO_PATH.format(
                     video_key=key,
                     chunk_index=chunk_idx,
@@ -342,6 +357,7 @@ def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chu
             else:
                 # Append to existing video file - use current accumulated offset
                 videos_idx[key]["src_to_offset"][(src_chunk_idx, src_file_idx)] = current_offset
+                videos_idx[key]["src_to_dst"][(src_chunk_idx, src_file_idx)] = (chunk_idx, file_idx)
                 concatenate_video_files(
                     [dst_path, src_path],
                     dst_path,
