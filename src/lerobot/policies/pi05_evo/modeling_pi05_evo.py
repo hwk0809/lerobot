@@ -1099,6 +1099,19 @@ class PI05EvoPolicy(PreTrainedPolicy):
 
             fixed_state_dict[new_key] = value
 
+        # Weight tying: lm_head.weight and embed_tokens.weight are shared in PaliGemma.
+        # Checkpoints only save one copy, so we need to duplicate it for strict loading.
+        for key in list(fixed_state_dict.keys()):
+            if (
+                key == "paligemma_with_expert.paligemma.lm_head.weight"
+                or key == "model.paligemma_with_expert.paligemma.lm_head.weight"
+            ):
+                embed_key = "paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
+                if key.startswith("model."):
+                    embed_key = "model." + embed_key
+                if embed_key not in fixed_state_dict:
+                    fixed_state_dict[embed_key] = fixed_state_dict[key].clone()
+
         return fixed_state_dict
 
     def get_optim_params(self) -> dict:
