@@ -178,20 +178,10 @@ class DualPiper(Robot):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        # FPS 监控
-        now = time.perf_counter()
-        if self._last_obs_time is not None:
-            actual_dt = now - self._last_obs_time
-            expected_dt = 1.0 / getattr(self.config, 'fps', 25)
-            if actual_dt > 1.5 * expected_dt:
-                logger.warning(
-                    f"Observation slow: {actual_dt*1000:.0f}ms "
-                    f"(target: {expected_dt*1000:.0f}ms)"
-                )
-        self._last_obs_time = now
+        obs_start = time.perf_counter()
 
-        # Read arm position
-        start = time.perf_counter()
+        # --- Robot state (CAN bus, cached reads) ---
+        state_start = time.perf_counter()
         # ==== 左臂 ====
         left_joint_state = self.piper_left.GetArmJointMsgs()
         self.motors["left_joint_1.pos"] = round(left_joint_state.joint_state.joint_1 / ARM_FACTOR, 8)
@@ -216,16 +206,14 @@ class DualPiper(Robot):
         right_gripper_raw = self.piper_right.GetArmGripperMsgs().gripper_state.grippers_angle
         self.motors["right_gripper.pos"] = round(right_gripper_raw /GRIPPER_FACTOR, 8)
         
-        dt_ms = (time.perf_counter() - start) * 1e3
-        logger.debug(f"{self} read state: {dt_ms:.1f}ms")
+        state_ms = (time.perf_counter() - state_start) * 1e3
         obs_dict = self.motors.copy()
 
-        # Capture images from cameras
+        # --- Camera images ---
+        cam_start = time.perf_counter()
         for cam_key, cam in self.cameras.items():
-            start = time.perf_counter()
             obs_dict[cam_key] = cam.async_read()
-            dt_ms = (time.perf_counter() - start) * 1e3
-            logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+        cam_ms = (time.perf_counter() - cam_start) * 1e3
         
         # ✅ Capture point cloud (async processing — returns latest processed result)
         # TODO(性能优化): 当前 process_point_cloud CPU 耗时 ~60ms，超过 25Hz 帧预算(40ms)，
@@ -235,8 +223,9 @@ class DualPiper(Robot):
         #
         # 防积压设计：只在上一个任务完成后才提交新任务，否则跳过本帧提交，复用缓存结果。
         # 这样后台线程永远只有 1 个任务在跑，不会队列堆积导致延迟越来越大。
+        pcd_ms = 0.0
         if self.point_cloud_camera is not None:
-            start = time.perf_counter()
+            pcd_start = time.perf_counter()
             num_points = self.config.point_cloud.num_points
             zero_pcd = np.zeros((num_points, 3), dtype=np.float32)
 
@@ -265,13 +254,22 @@ class DualPiper(Robot):
                 else:
                     obs_dict["observation.point_cloud"] = zero_pcd
 
-                dt_ms = (time.perf_counter() - start) * 1e3
-                logger.debug(f"{self} read point_cloud (async): {dt_ms:.1f}ms")
+                pcd_ms = (time.perf_counter() - pcd_start) * 1e3
 
             except Exception as e:
                 logger.error(f"Failed to read point cloud: {e}")
                 obs_dict["observation.point_cloud"] = zero_pcd
 
+        # --- Timing summary ---
+        total_ms = (time.perf_counter() - obs_start) * 1e3
+        expected_ms = 1000.0 / getattr(self.config, 'fps', 25)
+        if total_ms > expected_ms:
+            logger.warning(
+                "[OBS] %.0fms (budget %.0fms) "
+                "[state=%.1fms cam=%.1fms pcd=%.1fms]",
+                total_ms, expected_ms,
+                state_ms, cam_ms, pcd_ms,
+            )
         return obs_dict
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
