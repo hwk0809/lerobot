@@ -120,7 +120,7 @@ class DiffusionConfig(PreTrainedConfig):
     # Architecture / modeling.
     # Vision backbone.
     vision_backbone: str = "resnet18"
-    resize_shape: tuple[int, int] | None = None
+    resize_shape: tuple[int, int] | None = (180, 320)
     crop_ratio: float = 1.0
     crop_shape: tuple[int, int] | None = None
     crop_is_random: bool = True
