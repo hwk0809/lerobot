@@ -304,7 +304,7 @@ def encode_video_frames(
     imgs_dir: Path | str,
     video_path: Path | str,
     fps: int,
-    vcodec: str = "libsvtav1",
+    vcodec: str = "h264",
     pix_fmt: str = "yuv420p",
     g: int | None = 2,
     crf: int | None = 30,
@@ -362,6 +362,10 @@ def encode_video_frames(
 
     if vcodec == "libsvtav1":
         video_options["preset"] = str(preset) if preset is not None else "12"
+    elif vcodec == "h264":
+        # H.264 preset: 字符串, 从快到慢: ultrafast/superfast/veryfast/faster/fast/medium/slow/slower/veryslow
+        # veryfast 在保持合理压缩率的同时大幅提速编码 (vs medium ~2x 快).
+        video_options["preset"] = str(preset) if preset is not None else "veryfast"
 
     # Set logging level
     if log_level is not None:
