@@ -9,8 +9,8 @@ class SimDualPiperDeformableConfig(RobotConfig):
     """Configuration for the simulated Dual Piper robot with Style3D deformable physics."""
 
     # MuJoCo + Style3D environment
-    xml_path: str = "assets/mujoco_model/dual_piper_with_green_tshirt_rgb.xml"
-    urdf_path: str = "assets/Urdf/piper_description/piper_with_gripper.urdf"
+    xml_path: str = "assets/scene/mujoco/dual_piper_with_green_tshirt_rgb.xml"
+    urdf_path: str = "assets/robot/piper/urdf/piper_with_gripper.urdf"
 
     # Physics
     physics_freq: int = 500

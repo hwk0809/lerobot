@@ -335,7 +335,7 @@ class DeformableEnv(EnvConfig):
     episode_length: int = 500
     obs_type: str = "state_pcd"  # "state", "state_pcd", "state_pcd_pixels"
     render_mode: str = "rgb_array"
-    xml_path: str = "assets/mujoco_model/dual_piper_with_silk_camera.xml"
+    xml_path: str = "assets/scene/mujoco/dual_piper_with_silk_camera.xml"
     camera_name: str = "photoneo_cam"
     include_point_cloud: bool = True
     num_points: int = 2048

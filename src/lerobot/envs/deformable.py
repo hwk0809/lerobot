@@ -27,7 +27,7 @@ class DeformableClothEnv(gym.Env):
         obs_type: str = "state_pcd",
         render_mode: str = "rgb_array",
         max_episode_steps: int = 500,
-        xml_path: str = "assets/mujoco_model/dual_piper_with_silk_camera.xml",
+        xml_path: str = "assets/scene/mujoco/dual_piper_with_silk_camera.xml",
         camera_name: str = "photoneo_cam",
         include_point_cloud: bool = True,
         num_points: int = 2048,
