@@ -308,7 +308,6 @@ def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chu
 
         chunk_idx = video_idx["chunk"]
         file_idx = video_idx["file"]
-        current_offset = video_idx["latest_duration"]
 
         for src_chunk_idx, src_file_idx in unique_chunk_file_pairs:
             src_path = src_meta.root / DEFAULT_VIDEO_PATH.format(
@@ -326,13 +325,12 @@ def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chu
             src_duration = get_video_duration_in_s(src_path)
 
             if not dst_path.exists():
-                # Store offset before incrementing
-                videos_idx[key]["src_to_offset"][(src_chunk_idx, src_file_idx)] = current_offset
+                # Bootstrapping the very first dst chunk file: src starts at offset 0.
+                videos_idx[key]["src_to_offset"][(src_chunk_idx, src_file_idx)] = 0
                 videos_idx[key]["src_to_dst"][(src_chunk_idx, src_file_idx)] = (chunk_idx, file_idx)
                 dst_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy(str(src_path), str(dst_path))
                 videos_idx[key]["episode_duration"] += src_duration
-                current_offset += src_duration
                 continue
 
             # Check file sizes before appending
@@ -352,17 +350,20 @@ def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chu
                 )
                 dst_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy(str(src_path), str(dst_path))
-                # Reset offset for next file
-                current_offset = src_duration
             else:
-                # Append to existing video file - use current accumulated offset
-                videos_idx[key]["src_to_offset"][(src_chunk_idx, src_file_idx)] = current_offset
+                # Append to existing dst chunk file. Offset = duration ALREADY in dst
+                # before this src is appended. The previous logic used a `current_offset`
+                # initialized to `latest_duration` (= total of all prior datasets), which
+                # is wrong when a src dataset's first file appends to a dst chunk that
+                # already contains the previous dataset's tail. Using actual dst duration
+                # is correct in all cases (within-dataset append AND cross-dataset append).
+                dst_existing_duration = get_video_duration_in_s(dst_path)
+                videos_idx[key]["src_to_offset"][(src_chunk_idx, src_file_idx)] = dst_existing_duration
                 videos_idx[key]["src_to_dst"][(src_chunk_idx, src_file_idx)] = (chunk_idx, file_idx)
                 concatenate_video_files(
                     [dst_path, src_path],
                     dst_path,
                 )
-                current_offset += src_duration
 
             videos_idx[key]["episode_duration"] += src_duration
 
