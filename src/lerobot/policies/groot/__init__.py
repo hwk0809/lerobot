@@ -15,7 +15,18 @@
 # limitations under the License.
 
 from .configuration_groot import GrootConfig
-from .modeling_groot import GrootPolicy
+# processor must be eagerly imported so its @ProcessorStepRegistry.register
+# decorators run; otherwise PolicyProcessorPipeline.from_pretrained can't find
+# the step by name when loading a checkpoint.
 from .processor_groot import make_groot_pre_post_processors
+
+
+def __getattr__(name):
+    # Lazy-load modeling only — it pulls transformers + diffusers + torchvision (~30s).
+    if name == "GrootPolicy":
+        from .modeling_groot import GrootPolicy
+        return GrootPolicy
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = ["GrootConfig", "GrootPolicy", "make_groot_pre_post_processors"]

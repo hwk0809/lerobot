@@ -15,7 +15,16 @@
 # limitations under the License.
 
 from .configuration_pi05 import PI05Config
-from .modeling_pi05 import PI05Policy
+# processor eager-imported for @ProcessorStepRegistry.register side effects.
 from .processor_pi05 import make_pi05_pre_post_processors
+
+
+def __getattr__(name):
+    # Lazy-load modeling only — it pulls transformers + torchvision (~25s).
+    if name == "PI05Policy":
+        from .modeling_pi05 import PI05Policy
+        return PI05Policy
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = ["PI05Config", "PI05Policy", "make_pi05_pre_post_processors"]
