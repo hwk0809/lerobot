@@ -76,11 +76,35 @@ def _load_episode_with_stats(src_dataset: LeRobotDataset, episode_idx: int) -> d
     return episode_row.to_dict()
 
 
+def _source_video_codec(dataset: LeRobotDataset) -> str:
+    """Encoder name matching the source dataset's own video codec.
+
+    split/delete re-encode only the boundary video files (those spanning kept and
+    dropped episodes). Without this they fall back to a fixed default
+    (``libsvtav1``/AV1), silently switching the codec and producing a mixed-codec
+    dataset (e.g. h264 files + one AV1 boundary file per camera) — which also
+    decodes far slower on hardware without AV1 support (e.g. A100). Following the
+    source codec keeps the output uniform and consistent with how it was collected.
+    """
+    _DECODE_TO_ENCODER = {
+        "h264": "h264", "avc": "h264", "avc1": "h264",
+        "hevc": "hevc", "h265": "hevc",
+        "av1": "libsvtav1", "libdav1d": "libsvtav1", "libaom-av1": "libsvtav1",
+    }
+    for vkey in dataset.meta.video_keys:
+        info = (dataset.meta.features.get(vkey) or {}).get("info") or {}
+        codec = info.get("video.codec")
+        if codec:
+            return _DECODE_TO_ENCODER.get(codec, codec)
+    return "libsvtav1"
+
+
 def delete_episodes(
     dataset: LeRobotDataset,
     episode_indices: list[int],
     output_dir: str | Path | None = None,
     repo_id: str | None = None,
+    vcodec: str | None = None,
 ) -> LeRobotDataset:
     """Delete episodes from a LeRobotDataset and create a new dataset.
 
@@ -89,6 +113,9 @@ def delete_episodes(
         episode_indices: List of episode indices to delete.
         output_dir: Directory to save the new dataset. If None, uses default location.
         repo_id: Repository ID for the new dataset. If None, appends "_modified" to original.
+        vcodec: Codec for re-encoding boundary video files. If None (default), follows
+            the source dataset's codec so the output stays uniform (no silent switch to
+            AV1). Pass e.g. "h264" / "libsvtav1" to force a specific codec.
     """
     if not episode_indices:
         raise ValueError("No episodes to delete")
@@ -119,9 +146,10 @@ def delete_episodes(
 
     episode_mapping = {old_idx: new_idx for new_idx, old_idx in enumerate(episodes_to_keep)}
 
+    resolved_vcodec = vcodec or _source_video_codec(dataset)
     video_metadata = None
     if dataset.meta.video_keys:
-        video_metadata = _copy_and_reindex_videos(dataset, new_meta, episode_mapping)
+        video_metadata = _copy_and_reindex_videos(dataset, new_meta, episode_mapping, vcodec=resolved_vcodec)
 
     data_metadata = _copy_and_reindex_data(dataset, new_meta, episode_mapping)
 
@@ -143,6 +171,7 @@ def split_dataset(
     dataset: LeRobotDataset,
     splits: dict[str, float | list[int]],
     output_dir: str | Path | None = None,
+    vcodec: str | None = None,
 ) -> dict[str, LeRobotDataset]:
     """Split a LeRobotDataset into multiple smaller datasets.
 
@@ -151,6 +180,9 @@ def split_dataset(
         splits: Either a dict mapping split names to episode indices, or a dict mapping
                 split names to fractions (must sum to <= 1.0).
         output_dir: Base directory for output datasets. If None, uses default location.
+        vcodec: Codec for re-encoding boundary video files. If None (default), follows
+            the source dataset's codec so the output stays uniform (no silent switch to
+            AV1). Pass e.g. "h264" / "libsvtav1" to force a specific codec.
 
     Examples:
       Split by specific episodes
@@ -185,6 +217,7 @@ def split_dataset(
         output_dir = Path(output_dir)
 
     result_datasets = {}
+    resolved_vcodec = vcodec or _source_video_codec(dataset)
 
     for split_name, episodes in splits.items():
         logging.info(f"Creating split '{split_name}' with {len(episodes)} episodes")
@@ -211,7 +244,7 @@ def split_dataset(
 
         video_metadata = None
         if dataset.meta.video_keys:
-            video_metadata = _copy_and_reindex_videos(dataset, new_meta, episode_mapping)
+            video_metadata = _copy_and_reindex_videos(dataset, new_meta, episode_mapping, vcodec=resolved_vcodec)
 
         data_metadata = _copy_and_reindex_data(dataset, new_meta, episode_mapping)
 
