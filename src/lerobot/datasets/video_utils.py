@@ -168,7 +168,7 @@ def decode_video_frames_torchvision(
     closest_frames = closest_frames.type(torch.float32) / 255
 
     assert len(timestamps) == len(closest_frames)
-    return closest_frames
+    return closest_frames.contiguous()  # tcfix: pin_memory 需连续内存
 
 
 class VideoDecoderCache:
@@ -189,9 +189,10 @@ class VideoDecoderCache:
 
         with self._lock:
             if video_path not in self._cache:
-                file_handle = fsspec.open(video_path).__enter__()
-                decoder = VideoDecoder(file_handle, seek_mode="approximate")
-                self._cache[video_path] = (decoder, file_handle)
+                # tcfix: torchcodec 0.2.1 不认 fsspec file-like(该支持 0.3.0 才加),
+                # 直传路径;长视频随机 seek 比 pyav 快 ~470x。
+                decoder = VideoDecoder(video_path, seek_mode="approximate")
+                self._cache[video_path] = (decoder, None)
 
             return self._cache[video_path][0]
 
@@ -199,7 +200,8 @@ class VideoDecoderCache:
         """Clear the cache and close file handles."""
         with self._lock:
             for _, file_handle in self._cache.values():
-                file_handle.close()
+                if file_handle is not None:
+                    file_handle.close()
             self._cache.clear()
 
     def size(self) -> int:
