@@ -46,9 +46,17 @@ from piper_sdk import *
 logger = logging.getLogger(__name__)
 
 
-import sys
-sys.path.insert(0, '/home/ps/workspace/whr/deformable_bench')
-from common.pcd_utils import process_point_cloud
+def _process_point_cloud(*args, **kwargs):
+    """Lazy proxy for ``pcd_utils.process_point_cloud``.
+
+    Imported on first use rather than at module scope so that ``open3d`` stays
+    an optional dependency: it is only needed when a point-cloud camera
+    (Photoneo / ZED) is actually configured, which no image-based policy does.
+    """
+    from .pcd_utils import process_point_cloud
+
+    return process_point_cloud(*args, **kwargs)
+
 
 class DualPiper(Robot):
     """
@@ -242,7 +250,7 @@ class DualPiper(Robot):
                     # 读取新的原始点云并提交后处理
                     raw_pcd = self.point_cloud_camera.async_read(timeout_ms=2000)
                     self._pcd_future = self._pcd_executor.submit(
-                        process_point_cloud, raw_pcd,
+                        _process_point_cloud, raw_pcd,
                         num_points=num_points,
                         use_gpu=False, visualize=False
                     )
