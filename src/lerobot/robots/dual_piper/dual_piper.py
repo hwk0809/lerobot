@@ -19,31 +19,48 @@ import logging
 import time
 from functools import cached_property
 from typing import Any
+
 import numpy as np
 
 from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
-from lerobot.motors import Motor, MotorCalibration, MotorNormMode
-from lerobot.motors.feetech import (
-    FeetechMotorsBus,
-    OperatingMode,
-)
 
 from ..robot import Robot
-from ..utils import ensure_safe_goal_position
 from .config_dual_piper import DualPiperConfig
 
+# Piper SDK feedback units are 0.001 degree and 0.001 mm respectively.
+ARM_FACTOR = 1000.0 * 180.0 / np.pi
+GRIPPER_SDK_MAX = 70.0 * 1000.0
 
-# Piper global factor 
-ARM_FACTOR = 57295.779513 # 1000*180/np.pi
-GRIPPER_UNIT_FACTOR = 1000.0 * 1000.0  # unit 0.001mm
-GRIPPER_MAX = 0.1
-GRIPPER_FACTOR = GRIPPER_UNIT_FACTOR * GRIPPER_MAX
-
-# piper sdk
-from piper_sdk import *
+MOTOR_NAMES = (
+    "left_joint_1.pos",
+    "left_joint_2.pos",
+    "left_joint_3.pos",
+    "left_joint_4.pos",
+    "left_joint_5.pos",
+    "left_joint_6.pos",
+    "left_gripper.pos",
+    "right_joint_1.pos",
+    "right_joint_2.pos",
+    "right_joint_3.pos",
+    "right_joint_4.pos",
+    "right_joint_5.pos",
+    "right_joint_6.pos",
+    "right_gripper.pos",
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _make_piper_interface(port: str):
+    """Construct the SDK interface lazily so config/tests do not need hardware deps."""
+    try:
+        from piper_sdk import C_PiperInterface_V2
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "DualPiper requires `piper_sdk` on the real-robot machine."
+        ) from exc
+    return C_PiperInterface_V2(port)
 
 
 def _process_point_cloud(*args, **kwargs):
@@ -59,8 +76,11 @@ def _process_point_cloud(*args, **kwargs):
 
 
 class DualPiper(Robot):
-    """
-    Designed by cfy, jzh
+    """Read the two PiPER follower arms and their cameras.
+
+    Each master/follower pair shares one CAN bus. This driver therefore opens
+    exactly two SocketCAN interfaces and remains command-free; motion is
+    produced by the PiPER firmware linkage.
     """
 
     config_class = DualPiperConfig
@@ -69,29 +89,10 @@ class DualPiper(Robot):
     def __init__(self, config: DualPiperConfig):
         super().__init__(config)
         self.config = config
-        # 创建 robot 连接
-        self.piper_left = C_PiperInterface_V2("can_left")
-        self.piper_right = C_PiperInterface_V2("can_right")
-        # 创建 motor 映射
-        self.motors = {
-            "left_joint_1.pos": 0.0,
-            "left_joint_2.pos": 0.0,
-            "left_joint_3.pos": 0.0,
-            "left_joint_4.pos": 0.0,
-            "left_joint_5.pos": 0.0,
-            "left_joint_6.pos": 0.0,
-            "left_gripper.pos": 0.0,
-            "right_joint_1.pos": 0.0,
-            "right_joint_2.pos": 0.0,
-            "right_joint_3.pos": 0.0,
-            "right_joint_4.pos": 0.0,
-            "right_joint_5.pos": 0.0,
-            "right_joint_6.pos": 0.0,
-            "right_gripper.pos": 0.0,
-        }
-        # 创建相机
+        self.piper_left = _make_piper_interface(config.left_port)
+        self.piper_right = _make_piper_interface(config.right_port)
+        self.motors = dict.fromkeys(MOTOR_NAMES, 0.0)
         self.cameras = make_cameras_from_configs(config.cameras)
-        # 创建 robot 是否连接的标志位
         self.is_robot_connected = False
 
         self.point_cloud_camera = None
@@ -99,7 +100,7 @@ class DualPiper(Robot):
         self._pcd_future = None
         self._last_processed_pcd = None
         self._last_obs_time = None
-        if hasattr(config, 'point_cloud') and config.point_cloud.enabled:
+        if config.point_cloud.enabled:
             self._init_point_cloud_camera()
         
     @property
@@ -118,12 +119,13 @@ class DualPiper(Robot):
     
     @property
     def _motors_ft(self) -> dict[str, type]:
-        return {k: float for k in self.motors.keys()}
+        return dict.fromkeys(MOTOR_NAMES, float)
 
     @property
     def _cameras_ft(self) -> dict[str, tuple]:
         return {
-            cam: (self.config.cameras[cam].height, self.config.cameras[cam].width, 3) for cam in self.cameras
+            cam: (self.config.cameras[cam].height, self.config.cameras[cam].width, 3)
+            for cam in self.cameras
         }
 
     @cached_property
@@ -137,50 +139,78 @@ class DualPiper(Robot):
     @property
     def is_connected(self) -> bool:
         cameras_connected = all(cam.is_connected for cam in self.cameras.values())
-        
-
-        pcd_connected = (self.point_cloud_camera is None or 
-                        self.point_cloud_camera.is_connected)
+        pcd_connected = self.point_cloud_camera is None or self.point_cloud_camera.is_connected
         return self.is_robot_connected and cameras_connected and pcd_connected
 
     def connect(self, calibrate: bool = True) -> None:
-        """
-        We assume that at connection time, arm is in a rest position,
-        and torque can be safely disabled to run calibration.
-        """
-        # 如果 robot 和 cam 都已成功连接, 则报错
-        if self.is_connected:
+        """Open two passive CAN listeners plus configured cameras."""
+        if self.is_robot_connected:
             raise DeviceAlreadyConnectedError(f"{self} already connected")
 
-        # robot connect
-        self.piper_left.ConnectPort()
-        self.piper_right.ConnectPort()
-        self.is_robot_connected = True
+        connected_cameras = []
+        left_connected = False
+        right_connected = False
+        try:
+            self.piper_left.ConnectPort()
+            left_connected = True
+            self.piper_right.ConnectPort()
+            right_connected = True
+            self.is_robot_connected = True
 
-        for cam in self.cameras.values():
-            cam.connect()
+            for cam in self.cameras.values():
+                cam.connect()
+                connected_cameras.append(cam)
 
-        # ✅ 点云相机连接
-        if self.point_cloud_camera is not None:
-            logger.info("Connecting point cloud sensor...")
-            self.point_cloud_camera.connect()
-            self._pcd_executor = concurrent.futures.ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="pcd_proc"
-            )
-            logger.info("✅ Point cloud sensor connected (async processing enabled)")
-        logger.info(f"{self} connected.")
+            if self.point_cloud_camera is not None:
+                logger.info("Connecting point cloud sensor...")
+                self.point_cloud_camera.connect()
+                self._pcd_executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="pcd_proc"
+                )
+                logger.info("Point cloud sensor connected (async processing enabled)")
+        except Exception:
+            for cam in reversed(connected_cameras):
+                cam.disconnect()
+            if right_connected:
+                self.piper_right.DisconnectPort()
+            if left_connected:
+                self.piper_left.DisconnectPort()
+            self.is_robot_connected = False
+            raise
+        logger.info("%s connected.", self)
 
     @property
     def is_calibrated(self) -> bool:
         return True
     
-    def calibrate(self):
-        # 暂时空实现
-        pass
+    def calibrate(self) -> None:
+        return None
 
-    def configure(self):
-        # 暂时空实现
-        pass
+    def configure(self) -> None:
+        return None
+
+    @staticmethod
+    def _arm_state(interface, side: str) -> dict[str, float]:
+        joint_state = interface.GetArmJointMsgs().joint_state
+        state = {
+            f"{side}_joint_{i}.pos": round(
+                float(getattr(joint_state, f"joint_{i}")) / ARM_FACTOR, 8
+            )
+            for i in range(1, 7)
+        }
+        gripper_raw = interface.GetArmGripperMsgs().gripper_state.grippers_angle
+        state[f"{side}_gripper.pos"] = round(
+            float(np.clip(float(gripper_raw) / GRIPPER_SDK_MAX, 0.0, 1.0)), 8
+        )
+        return state
+
+    def get_joint_state(self) -> dict[str, float]:
+        """Read follower joint/gripper feedback without touching the cameras."""
+        if not self.is_robot_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+        self.motors.update(self._arm_state(self.piper_left, "left"))
+        self.motors.update(self._arm_state(self.piper_right, "right"))
+        return self.motors.copy()
 
     def get_observation(self) -> dict[str, Any]:
         if not self.is_connected:
@@ -188,34 +218,9 @@ class DualPiper(Robot):
 
         obs_start = time.perf_counter()
 
-        # --- Robot state (CAN bus, cached reads) ---
         state_start = time.perf_counter()
-        # ==== 左臂 ====
-        left_joint_state = self.piper_left.GetArmJointMsgs()
-        self.motors["left_joint_1.pos"] = round(left_joint_state.joint_state.joint_1 / ARM_FACTOR, 8)
-        self.motors["left_joint_2.pos"] = round(left_joint_state.joint_state.joint_2 / ARM_FACTOR, 8)
-        self.motors["left_joint_3.pos"] = round(left_joint_state.joint_state.joint_3 / ARM_FACTOR, 8)
-        self.motors["left_joint_4.pos"] = round(left_joint_state.joint_state.joint_4 / ARM_FACTOR, 8)
-        self.motors["left_joint_5.pos"] = round(left_joint_state.joint_state.joint_5 / ARM_FACTOR, 8)
-        self.motors["left_joint_6.pos"] = round(left_joint_state.joint_state.joint_6 / ARM_FACTOR, 8)
-
-        left_gripper_raw = self.piper_left.GetArmGripperMsgs().gripper_state.grippers_angle
-        self.motors["left_gripper.pos"] = round(left_gripper_raw /GRIPPER_FACTOR, 8)
-
-        # ==== 右臂 ====
-        right_joint_state = self.piper_right.GetArmJointMsgs()
-        self.motors["right_joint_1.pos"] = round(right_joint_state.joint_state.joint_1 / ARM_FACTOR, 8)
-        self.motors["right_joint_2.pos"] = round(right_joint_state.joint_state.joint_2 / ARM_FACTOR, 8)
-        self.motors["right_joint_3.pos"] = round(right_joint_state.joint_state.joint_3 / ARM_FACTOR, 8)
-        self.motors["right_joint_4.pos"] = round(right_joint_state.joint_state.joint_4 / ARM_FACTOR, 8)
-        self.motors["right_joint_5.pos"] = round(right_joint_state.joint_state.joint_5 / ARM_FACTOR, 8)
-        self.motors["right_joint_6.pos"] = round(right_joint_state.joint_state.joint_6 / ARM_FACTOR, 8)
-
-        right_gripper_raw = self.piper_right.GetArmGripperMsgs().gripper_state.grippers_angle
-        self.motors["right_gripper.pos"] = round(right_gripper_raw /GRIPPER_FACTOR, 8)
-        
+        obs_dict: dict[str, Any] = self.get_joint_state()
         state_ms = (time.perf_counter() - state_start) * 1e3
-        obs_dict = self.motors.copy()
 
         # --- Camera images ---
         cam_start = time.perf_counter()
@@ -281,14 +286,10 @@ class DualPiper(Robot):
         return obs_dict
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        """Remain command-free while firmware master/slave linkage is active."""
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
-
-        if self.motors is None:
-            raise DeviceNotConnectedError(f"self motor value is None.")
-        
-        action_dict = self.motors.copy()
-        return action_dict
+        return self.motors.copy()
     
     def _init_point_cloud_camera(self):
         """初始化点云相机"""
@@ -326,25 +327,34 @@ class DualPiper(Robot):
             raise ValueError(f"Unsupported point cloud camera: {pcd_cfg.camera_type}")
 
 
-    def disconnect(self):
-        if not self.is_connected:
+    def disconnect(self) -> None:
+        if not self.is_robot_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        for cam in self.cameras.values():
-            cam.disconnect()
+        try:
+            for cam in self.cameras.values():
+                if cam.is_connected:
+                    cam.disconnect()
 
-        if self.point_cloud_camera is not None:
-            logger.info("Disconnecting point cloud sensor...")
-            # 等待后台点云处理完成
-            if self._pcd_future is not None:
+            if self.point_cloud_camera is not None:
+                logger.info("Disconnecting point cloud sensor...")
+                if self._pcd_future is not None:
+                    try:
+                        self._pcd_future.result(timeout=5)
+                    except Exception:
+                        pass
+                if self._pcd_executor is not None:
+                    self._pcd_executor.shutdown(wait=True)
+                    self._pcd_executor = None
+                if self.point_cloud_camera.is_connected:
+                    self.point_cloud_camera.disconnect()
+        finally:
+            try:
+                self.piper_right.DisconnectPort()
+            finally:
                 try:
-                    self._pcd_future.result(timeout=5)
-                except Exception:
-                    pass
-            if self._pcd_executor is not None:
-                self._pcd_executor.shutdown(wait=True)
-                self._pcd_executor = None
-            self.point_cloud_camera.disconnect()
-            logger.info("✅ Point cloud sensor disconnected")
+                    self.piper_left.DisconnectPort()
+                finally:
+                    self.is_robot_connected = False
 
-        logger.info(f"{self} disconnected.")
+        logger.info("%s disconnected.", self)

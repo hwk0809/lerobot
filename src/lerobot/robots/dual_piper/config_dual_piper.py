@@ -37,8 +37,12 @@ class PointCloudSensorConfig:
 @RobotConfig.register_subclass("dual_piper")
 @dataclass
 class DualPiperConfig(RobotConfig):
-    # Port to connect to the arm
-    # port: str
+    """Configuration for the two follower arms on the shared linkage buses."""
+
+    # One SocketCAN interface per master/follower pair. The master and follower
+    # of a side share this bus; no separate master-arm interface is required.
+    left_port: str = "can_left"
+    right_port: str = "can_right"
 
     disable_torque_on_disconnect: bool = True
 
@@ -58,4 +62,10 @@ class DualPiperConfig(RobotConfig):
 
     point_cloud: PointCloudSensorConfig = field(default_factory=PointCloudSensorConfig)
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not self.left_port or not self.right_port:
+            raise ValueError("left_port and right_port must be non-empty SocketCAN interface names")
+        if self.left_port == self.right_port:
+            raise ValueError("left_port and right_port must identify two different CAN buses")
 
