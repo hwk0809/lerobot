@@ -27,7 +27,7 @@ from torch.optim import Optimizer
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets.factory import make_dataset
-from lerobot.datasets.sampler import EpisodeAwareSampler
+from lerobot.datasets.sampler import EpisodeAwareSampler, make_cotrain_sampler
 from lerobot.datasets.utils import cycle
 from lerobot.envs.factory import make_env, make_env_pre_post_processors
 from lerobot.envs.utils import close_envs
@@ -271,7 +271,24 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
     # create dataloader for offline training
-    if hasattr(cfg.policy, "drop_n_last_frames"):
+    if cfg.dataset.cotrain_w is not None:
+        # Sim/real co-training: draw each sample from the sim/real half with a fixed
+        # probability instead of walking the merged dataset uniformly. Takes precedence
+        # over the episode-aware sampler (dp's drop_n_last_frames is not supported here).
+        if hasattr(cfg.policy, "drop_n_last_frames"):
+            raise NotImplementedError(
+                "cotrain_w is not supported for policies using drop_n_last_frames (e.g. diffusion)"
+            )
+        shuffle = False
+        sampler = make_cotrain_sampler(
+            dataset, cfg.dataset.cotrain_w, cfg.dataset.cotrain_split_episode
+        )
+        if is_main_process:
+            logging.info(
+                f"co-training sampler: cotrain_w={cfg.dataset.cotrain_w} "
+                f"split_episode={cfg.dataset.cotrain_split_episode}"
+            )
+    elif hasattr(cfg.policy, "drop_n_last_frames"):
         shuffle = False
         sampler = EpisodeAwareSampler(
             dataset.meta.episodes["dataset_from_index"],

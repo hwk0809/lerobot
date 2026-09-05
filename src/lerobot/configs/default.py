@@ -35,6 +35,10 @@ class DatasetConfig:
     use_imagenet_stats: bool = True
     video_backend: str = field(default_factory=get_safe_default_codec)
     streaming: bool = False
+    # Sim/real co-training on a dataset merged by `aggregate_datasets`: probability that a
+    # drawn sample comes from the real half (episodes >= cotrain_split_episode). None = off.
+    cotrain_w: float | None = None
+    cotrain_split_episode: int | None = None
 
 
 @dataclass

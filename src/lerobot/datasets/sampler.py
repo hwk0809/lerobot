@@ -59,3 +59,50 @@ class EpisodeAwareSampler:
 
     def __len__(self) -> int:
         return len(self.indices)
+
+
+def make_cotrain_sampler(
+    dataset,
+    real_w: float,
+    split_episode: int,
+) -> "torch.utils.data.WeightedRandomSampler":
+    """Sim/real co-training sampler for a dataset merged by `aggregate_datasets`.
+
+    Episodes `[0, split_episode)` are the simulation half and `[split_episode, N)` the real
+    half (that is the order `tools/make_cotrain_dataset.py` writes, and it records
+    `split_episode` in `meta/cotrain_meta.json`). Every drawn sample lands in the real half
+    with probability `real_w`, uniformly within each half.
+
+    This is the per-sample reweighting used in the sim-and-real co-training literature
+    (arXiv:2503.24361), not a hard per-batch quota: a batch contains real samples only in
+    expectation. With `real_w` left at the natural frame ratio the sampler is equivalent to
+    plain shuffling, so it only earns its keep when sweeping the ratio.
+    """
+    from_indices = dataset.meta.episodes["dataset_from_index"]
+    to_indices = dataset.meta.episodes["dataset_to_index"]
+    num_episodes = len(from_indices)
+
+    if not 0.0 < real_w < 1.0:
+        raise ValueError(f"cotrain_w must be in (0, 1), got {real_w}")
+    if not 0 < split_episode < num_episodes:
+        raise ValueError(
+            f"cotrain_split_episode must be in (0, {num_episodes}), got {split_episode}"
+        )
+
+    spans = [(int(f), int(t)) for f, t in zip(from_indices, to_indices, strict=True)]
+    sim_frames = sum(t - f for (f, t) in spans[:split_episode])
+    real_frames = sum(t - f for (f, t) in spans[split_episode:])
+    if sim_frames == 0 or real_frames == 0:
+        raise ValueError(f"empty half: sim_frames={sim_frames} real_frames={real_frames}")
+
+    total_frames = sim_frames + real_frames
+    weights = torch.zeros(total_frames, dtype=torch.double)
+    for episode_idx, (start, end) in enumerate(spans):
+        if episode_idx < split_episode:
+            weights[start:end] = (1.0 - real_w) / sim_frames
+        else:
+            weights[start:end] = real_w / real_frames
+
+    return torch.utils.data.WeightedRandomSampler(
+        weights, num_samples=total_frames, replacement=True
+    )
